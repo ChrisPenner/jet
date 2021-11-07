@@ -26,6 +26,7 @@ source-repository head
 library
   exposed-modules:
       Lib
+      Pretty
   other-modules:
       Paths_structural_json
   hs-source-dirs:
@@ -33,7 +34,10 @@ library
   build-depends:
       aeson
     , aeson-extra
+    , aeson-pretty
     , base >=4.7 && <5
+    , bytestring
+    , comonad
     , containers
     , free
     , lens
@@ -41,6 +45,8 @@ library
     , recursion-schemes
     , recursion-zipper
     , text
+    , unordered-containers
+    , vector
     , vty
   default-language: Haskell2010
 
@@ -54,7 +60,10 @@ executable structural-json-exe
   build-depends:
       aeson
     , aeson-extra
+    , aeson-pretty
     , base >=4.7 && <5
+    , bytestring
+    , comonad
     , containers
     , free
     , lens
@@ -63,6 +72,8 @@ executable structural-json-exe
     , recursion-zipper
     , structural-json
     , text
+    , unordered-containers
+    , vector
     , vty
   default-language: Haskell2010
 
@@ -77,7 +88,10 @@ test-suite structural-json-test
   build-depends:
       aeson
     , aeson-extra
+    , aeson-pretty
     , base >=4.7 && <5
+    , bytestring
+    , comonad
     , containers
     , free
     , lens
@@ -86,5 +100,7 @@ test-suite structural-json-test
     , recursion-zipper
     , structural-json
     , text
+    , unordered-containers
+    , vector
     , vty
   default-language: Haskell2010

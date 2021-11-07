@@ -31,6 +31,11 @@ dependencies:
 - vty
 - text
 - free
+- vector
+- unordered-containers
+- aeson-pretty
+- bytestring
+- comonad
 
 library:
   source-dirs: src
