@@ -1,14 +1,14 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE FlexibleContexts #-}
 
 module Lib where
 
@@ -17,6 +17,7 @@ import Control.Comonad.Cofree
 import qualified Control.Comonad.Cofree as Cofree
 import Control.Lens
 import Control.Monad
+import Control.Monad.State
 import Data.Aeson (Value (String))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Extra
@@ -35,7 +36,6 @@ import Graphics.Vty
 import qualified Graphics.Vty as Vty
 import Pretty
 import qualified Zipper as Z
-import Control.Monad.State
 
 data FocusState = FS
   { keySelection :: Maybe Text,
@@ -67,7 +67,7 @@ maybeQuit = \case
   EvKey (KChar 'c') [Vty.MCtrl] -> True
   _ -> False
 
-handleEvent :: MonadState FocusState m => Z.Zipper ValueF a ->  Vty.Event -> m (Z.Zipper ValueF a)
+handleEvent :: MonadState FocusState m => Z.Zipper ValueF a -> Vty.Event -> m (Z.Zipper ValueF a)
 handleEvent z = \case
   EvKey key mods -> case key of
     KChar 'h' -> pure $ Z.tug Z.up z
@@ -81,41 +81,72 @@ nextSibling :: Z.Zipper ValueF a -> Z.Zipper ValueF a
 nextSibling z = fromMaybe z $ do
   parent <- Z.up z
   curI <- Z.currentIndex z
-  newI <- case Z.branches parent of
-    ObjectF hm -> do
-      let keys = HM.keys hm
-      (_, newKey) <- List.find ((curI ==) . Key . fst) (zip (HM.keys hm) (drop 1 $ HM.keys hm))
-      pure $ Key newKey
-    ArrayF _ -> case curI of
-      (Index i) -> pure . Index $ i + 1
-      _ -> Nothing
-    StringF txt -> Nothing
-    NumberF sci -> Nothing
-    BoolF b -> Nothing
-    NullF -> Nothing
-  Z.down newI parent
+  let newI = case Z.branches parent of
+        ObjectF hm -> do
+          let keys = HM.keys hm
+          (_, newKey) <- List.find ((curI ==) . Key . fst) (zip (HM.keys hm) (drop 1 $ HM.keys hm))
+          pure $ Key newKey
+        ArrayF xs -> case curI of
+          (Index i) | i < (length xs - 1) -> pure . Index $ i + 1
+          _ -> Nothing
+        StringF txt -> Nothing
+        NumberF sci -> Nothing
+        BoolF b -> Nothing
+        NullF -> Nothing
+  case newI of
+    Just i -> Z.down i parent
+    Nothing -> do
+      next <- nextSibling <$> Z.up z
+      fstI <- getFirstIdx (Z.branches next)
+      Z.down fstI next
 
 prevSibling :: Z.Zipper ValueF a -> Z.Zipper ValueF a
 prevSibling z = fromMaybe z $ do
   parent <- Z.up z
   curI <- Z.currentIndex z
-  newI <- case Z.branches parent of
-    ObjectF hm -> do
-      let keys = HM.keys hm
-      (newKey, _) <- List.find ((curI ==) . Key . snd) (zip (HM.keys hm) (drop 1 $ HM.keys hm))
-      pure $ Key newKey
-    ArrayF _ -> case curI of
-      (Index i) -> pure . Index $ i - 1
-      _ -> Nothing
-    StringF txt -> Nothing
-    NumberF sci -> Nothing
-    BoolF b -> Nothing
-    NullF -> Nothing
-  Z.down newI parent
+  let newI = case Z.branches parent of
+        ObjectF hm -> do
+          let keys = HM.keys hm
+          (newKey, _) <- List.find ((curI ==) . Key . snd) (zip (HM.keys hm) (drop 1 $ HM.keys hm))
+          pure $ Key newKey
+        ArrayF _ -> case curI of
+          (Index 0) -> Nothing
+          (Index i) -> pure . Index $ i - 1
+          _ -> Nothing
+        StringF txt -> Nothing
+        NumberF sci -> Nothing
+        BoolF b -> Nothing
+        NullF -> Nothing
+  case newI of
+    Just i -> Z.down i parent
+    Nothing -> do
+      prev <- prevSibling <$> Z.up z
+      lastI <- getLastIdx (Z.branches prev)
+      Z.down lastI prev
+
+getFirstIdx :: ValueF x -> Maybe JIndex
+getFirstIdx = \case
+  ObjectF hm -> Key . fst <$> uncons (HM.keys hm)
+  ArrayF Empty -> Nothing
+  ArrayF vec -> Just $ Index 0
+  StringF txt -> Nothing
+  NumberF sci -> Nothing
+  BoolF b -> Nothing
+  NullF -> Nothing
+
+getLastIdx :: ValueF x -> Maybe JIndex
+getLastIdx = \case
+  ObjectF hm -> Key . snd <$> unsnoc (HM.keys hm)
+  ArrayF Empty -> Nothing
+  ArrayF vec -> Just $ Index (length vec - 1)
+  StringF txt -> Nothing
+  NumberF sci -> Nothing
+  BoolF b -> Nothing
+  NullF -> Nothing
 
 into :: MonadState FocusState m => Z.Zipper ValueF a -> m (Z.Zipper ValueF a)
 into z = do
-  FS{..}<- get
+  FS {..} <- get
   case (Z.branches z) of
     (ObjectF hm) -> do
       let fstKey = (HM.keys hm) ^? _head
@@ -124,7 +155,7 @@ into z = do
           case fstKey of
             Nothing -> pure z
             Just k -> do
-              modify (\fs -> fs{keySelection=Just k})
+              modify (\fs -> fs {keySelection = Just k})
               pure z
         Just k -> pure $ Z.tug (Z.down (Key k)) z
     ArrayF vec ->
