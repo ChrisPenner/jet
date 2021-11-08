@@ -3,10 +3,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE TemplateHaskell #-}
 
 module Lib where
 
@@ -34,17 +34,14 @@ import qualified Graphics.Vty as Vty
 import Pretty
 import qualified Zipper as Z
 
-import New
-
 data FocusState = FS
-  { keySelection :: Maybe Text
-  , buffer :: Maybe Text
+  { keySelection :: Maybe Text,
+    buffer :: Maybe Text
   }
-
 
 run :: IO ()
 run = do
-  void $ edit $ fromJust $ Aeson.decode ("[\"hi\", {\"testing\":[1, 2, 3, 4]}, [4, 5, 6]]")
+  void $ edit $ fromJust $ Aeson.decode ("[\"hi\", {\"testing\":[1, 2, false, null]}, [4, 5, 6]]")
 
 edit :: Value -> IO Value
 edit value = do
@@ -61,7 +58,6 @@ edit value = do
   v <- loop start
   Vty.shutdown vty
   pure (Z.flatten v)
-
 
 maybeQuit :: Vty.Event -> Bool
 maybeQuit = \case
@@ -105,7 +101,7 @@ handleEvent z = \case
 
 nextSibling :: Z.Zipper ValueF a -> Z.Zipper ValueF a
 nextSibling z = fromMaybe z $ do
-  parent <-  Z.up z
+  parent <- Z.up z
   curI <- Z.currentIndex z
   newI <- case Z.branches parent of
     ObjectF hm -> do
@@ -123,7 +119,7 @@ nextSibling z = fromMaybe z $ do
 
 prevSibling :: Z.Zipper ValueF a -> Z.Zipper ValueF a
 prevSibling z = fromMaybe z $ do
-  parent <-  Z.up z
+  parent <- Z.up z
   curI <- Z.currentIndex z
   newI <- case Z.branches parent of
     ObjectF hm -> do
@@ -153,33 +149,39 @@ into z = case (Z.branches z) of
 
 renderValue' :: Z.Zipper ValueF Vty.Image -> Vty.Image
 renderValue' z =
-  let newA = toImage 0 (Vty.withStyle defAttr Vty.reverseVideo) (z ^. Z.unwrapped . _unwrap . to (fmap Comonad.extract))
-   in Z.foldSpine (toImage 0 defAttr) $ (z & Z.focus_ .~ newA)
+  let newA = toImage 0 (colorText (flip Vty.withStyle Vty.reverseVideo)) (z ^. Z.unwrapped . _unwrap . to (fmap Comonad.extract))
+   in Z.foldSpine (toImage 0 (colorText id)) $ (z & Z.focus_ .~ newA)
 
-toImage :: Int -> Attr -> ValueF Image -> Image
-toImage i attr (StringF t) = indentLine i (Vty.text' attr ("\"" <> t <> "\""))
-toImage i attr NullF = indentLine i (Vty.text' attr "null")
-toImage i attr (NumberF n) = indentLine i (Vty.text' attr (Text.pack $ show n))
-toImage i attr (BoolF b) = indentLine i (Vty.text' attr (Text.pack $ show b))
-toImage i attr (ArrayF xs) = prettyArray i attr xs
-toImage i attr (ObjectF xs) = prettyObj i attr xs
+toImage :: Int -> (Maybe Vty.Color -> Text -> Vty.Image) -> ValueF Image -> Image
+toImage i img (StringF t) = indentLine i (img (Just green) ("\"" <> t <> "\""))
+toImage i img NullF = indentLine i (img (Just Vty.yellow) "null")
+toImage i img (NumberF n) = indentLine i (img (Just Vty.blue) (Text.pack $ show n))
+toImage i img (BoolF b) = indentLine i (img (Just Vty.magenta) (Text.pack $ show b))
+toImage i img (ArrayF xs) = prettyArray i img xs
+toImage i img (ObjectF xs) = prettyObj i img xs
+
+colorText :: (Attr -> Attr) -> (Maybe Vty.Color) -> Text -> Vty.Image
+colorText mod col txt = Vty.text' (mod $ maybe Vty.defAttr (Vty.withForeColor Vty.defAttr) col) txt <|> colorFix
 
 renderedZipper :: Cofree ValueF x -> Cofree ValueF Image
-renderedZipper = Z.retag (toImage 0 defAttr)
+renderedZipper = Z.retag (toImage 0 (colorText id))
 
 atom :: Text -> Vty.Image
 atom t = Vty.text' defAttr t
 
-prettyArray :: Int -> Attr -> Vector Vty.Image -> Vty.Image
-prettyArray i attr vs =
+prettyArray :: Int -> (Maybe Vty.Color -> Text -> Vty.Image) -> Vector Vty.Image -> Vty.Image
+prettyArray i img vs =
   let inner :: [Image] = indented 1 (Vector.toList vs)
-   in Vty.vertCat . indented i $ [Vty.char attr '['] ++ inner ++ [Vty.char attr ']']
+   in Vty.vertCat . indented i $ [img Nothing "["] ++ inner ++ [img Nothing "]"]
 
-prettyObj :: Int -> Attr -> HashMap Text Vty.Image -> Vty.Image
-prettyObj i attr vs =
-  let inner :: [Image] = indented 1 (HM.foldrWithKey' (\k v a -> [Vty.string (Vty.withForeColor defAttr Vty.red) (show k) <|> Vty.text' defAttr ": ", v] ++ a) [] vs)
+prettyObj :: Int -> (Maybe Vty.Color -> Text -> Vty.Image) -> HashMap Text Vty.Image -> Vty.Image
+prettyObj i img vs =
+  let inner :: [Image] = indented 1 (HM.foldrWithKey' (\k v a -> [Vty.string (Vty.withForeColor defAttr Vty.cyan) (show k) <|> Vty.text' defAttr ": ", v] ++ a) [] vs)
    in Vty.vertCat . indented i $
-        ([Vty.char attr '{'] ++ inner ++ [Vty.char attr '}'])
+        ([img Nothing "{"] ++ inner ++ [img Nothing "}"])
+
+colorFix :: Vty.Image
+colorFix = Vty.text' defAttr ""
 
 indented :: Functor f => Int -> f Vty.Image -> f Vty.Image
 indented n xs = (indentLine n) <$> xs

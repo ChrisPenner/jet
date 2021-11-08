@@ -26,7 +26,6 @@ source-repository head
 library
   exposed-modules:
       Lib
-      New
       Pretty
   other-modules:
       Paths_structural_json
