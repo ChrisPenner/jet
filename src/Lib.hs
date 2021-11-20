@@ -23,7 +23,7 @@ import Control.Monad.State
 import Data.Aeson (Value (String))
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Extra
-import qualified Data.ByteString.Lazy as BS
+import qualified Data.ByteString.Lazy.Char8 as BS
 import qualified Data.Functor.Foldable as FF
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
@@ -40,6 +40,7 @@ import qualified Graphics.Vty as Vty
 import Text.Read (readMaybe)
 import qualified Zipper as Z
 import Data.Aeson.Encode.Pretty (encodePretty)
+import Data.Bifunctor (first, Bifunctor (second))
 
 type Buffer = TZ.TextZipper Text
 
@@ -58,13 +59,13 @@ makeLenses ''FocusState
 makeLenses ''NodeState
 
 -- Traversal into the buffer that also updates the rendered images on the focus.
-buffer_ :: Traversal' (Z.Zipper ValueF FocusState) (TZ.TextZipper Text)
-buffer_ f z =
+buffer_ :: Focused -> Traversal' (Z.Zipper ValueF FocusState) (TZ.TextZipper Text)
+buffer_ foc f z =
   case z ^? Z.focus_ . buffer of
     Nothing -> pure z
     Just buf -> f buf <&> \after ->
                   if buf == after then z
-                                  else rerenderFocus id (z & Z.focus_ . buffer .~ after)
+                                  else rerenderFocus foc (z & Z.focus_ . buffer .~ after)
 
 selectedKey_ :: Traversal' (Z.Zipper ValueF FocusState) Text
 selectedKey_ = Z.focus_ . nodeState . selectedKey
@@ -84,9 +85,9 @@ edit value = do
   vty <- liftIO $ mkVty config
   let start = fromJust $ (Z.down (Index 0)) . Z.zipper . toCofree $ value
   let loop mode foc = do
-        liftIO $ update vty . Vty.picForImage $ renderValue' foc
+        liftIO $ update vty . Vty.picForImage $ renderValue' Focused foc
         e <- liftIO $ nextEvent vty
-        let (mode', foc') = handleEvent mode foc e
+        let (mode', foc') = handleEvent mode foc e & second (rerenderFocus Focused)
         if (maybeQuit e)
           then pure foc'
           else (loop mode' foc')
@@ -104,7 +105,7 @@ bufferText = Text.concat . TZ.getText
 
 updateValF :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 updateValF z =
-  let txt = z ^. buffer_ . to bufferText
+  let txt = z ^. buffer_ Focused . to bufferText
    in z & Z.unwrapped_ . _unwrap
         %~ ( \case
                o@(ObjectF hm) -> o
@@ -114,7 +115,7 @@ updateValF z =
                BoolF b -> BoolF . fromMaybe b . readMaybe $ Text.unpack txt
                NullF -> NullF
            )
-        & rerenderFocus id
+        & rerenderFocus Focused
 
 valueFText :: Traversal' (ValueF x) Text
 valueFText f = \case
@@ -138,7 +139,8 @@ handleEvent mode z e =
       case e of
         EvKey key mods ->
           case key of
-            KChar c -> (mode, z & buffer_ %~ TZ.insertChar c)
+            KChar c -> (mode, z & buffer_ Focused %~ TZ.insertChar c)
+            KBS -> (mode, z & buffer_ Focused %~ TZ.deletePrevChar)
             KEsc -> do
               (Move, updateValF z)
             _ -> (mode, z)
@@ -146,10 +148,10 @@ handleEvent mode z e =
     Move ->
       case e of
         EvKey key mods -> case key of
-          KChar 'h' -> (mode, Z.tug Z.up z)
-          KChar 'l' -> (mode, into z)
-          KChar 'j' -> (mode, nextSibling z)
-          KChar 'k' -> (mode, prevSibling z)
+          KChar 'h' -> (mode, z & rerenderFocus NotFocused & Z.tug Z.up)
+          KChar 'l' -> (mode, z & rerenderFocus NotFocused & into)
+          KChar 'j' -> (mode, z & rerenderFocus NotFocused & nextSibling)
+          KChar 'k' -> (mode, z & rerenderFocus NotFocused & prevSibling)
           KChar 'i' -> (Edit, z)
           _ -> (mode, z)
         _ -> (mode, z)
@@ -250,37 +252,48 @@ into z =
     BoolF b -> z
     NullF -> z
 
-renderValue' :: Z.Zipper ValueF FocusState -> Image
-renderValue' z =
-  Z.foldSpine alg $ (_rendered <$> rerenderFocus (flip Vty.withStyle Vty.reverseVideo) z)
+renderValue' :: Focused -> Z.Zipper ValueF FocusState -> Image
+renderValue' foc z =
+  Z.foldSpine alg $ (_rendered <$> rerenderFocus foc z)
     where
       alg :: Image -> ValueF Image -> Image
       alg img = \case
-        ObjectF hm -> prettyObj 2 (colorText id) hm
-        ArrayF vec -> prettyArray 2 (colorText id) vec
+        ObjectF hm -> prettyObj 2 NotFocused hm
+        ArrayF vec -> prettyArray 2 NotFocused vec
         StringF txt -> img
         NumberF sci -> img
         BoolF b -> img
         NullF -> img
 
-rerenderFocus :: (Attr -> Attr) -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
-rerenderFocus mod z = z & Z.focus_ . rendered .~ renderSubtree mod (z ^. Z.unwrapped_)
+rerenderFocus :: Focused -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
+rerenderFocus foc z = z & Z.focus_ . rendered .~ renderSubtree foc (z ^. Z.unwrapped_)
 
-renderSubtree :: (Attr -> Attr) -> Cofree ValueF FocusState -> Vty.Image
-renderSubtree mod z = case z ^. Cofree._unwrap of
-  StringF t -> indentLine i (img (Just green) ("\"" <> fromMaybe t mTxt <> "\""))
-  NullF -> indentLine i (img (Just Vty.yellow) "null")
-  (NumberF n) -> indentLine i (img (Just Vty.blue) $ fromMaybe (Text.pack . show $ n) mTxt)
-  (BoolF b) -> indentLine i (img (Just Vty.magenta) (Text.pack . show $ b))
-  (ArrayF xs) -> prettyArray i img (renderChildren xs)
-  (ObjectF xs) -> prettyObj i img (renderChildren xs)
+data Focused = Focused | NotFocused
+
+renderSubtree :: Focused -> Cofree ValueF FocusState -> Vty.Image
+renderSubtree foc z = case z ^. Cofree._unwrap of
+  StringF t -> indentLine i (colored green "\"" <> bufImg green <> colored green "\"")
+  NullF -> indentLine i (colored Vty.yellow "null")
+  (NumberF n) -> indentLine i (bufImg blue)
+  (BoolF b) -> indentLine i (bufImg magenta)
+  (ArrayF xs) -> prettyArray i foc (renderChildren xs)
+  (ObjectF xs) -> prettyObj i foc (renderChildren xs)
   where
-    mTxt :: (Maybe Text)
-    mTxt = z ^? Cofree._extract . buffer . to bufferText
+    colored col = Vty.text' (Vty.withForeColor Vty.defAttr col)
+    bufImg :: Vty.Color -> Image
+    bufImg col = renderBuffer foc (Vty.defAttr `Vty.withForeColor` col) $ z ^. Cofree._extract . buffer
     renderChildren :: (Functor g, Functor f) => f (Cofree g FocusState) -> f Vty.Image
     renderChildren = fmap (_rendered . Comonad.extract)
-    img = colorText mod
     i = 2
+
+renderBuffer :: Focused -> Attr -> Buffer -> Image
+renderBuffer NotFocused attr buf = Vty.text' attr $ bufferText buf
+renderBuffer Focused attr buf =
+  let (prefix, suffix) = Text.splitAt (snd $ TZ.cursorPosition buf) (bufferText buf)
+      suffixImg = case Text.uncons suffix of
+        Nothing -> Vty.char (Vty.withStyle attr Vty.reverseVideo) ' '
+        Just (c, rest) -> Vty.char (Vty.withStyle attr Vty.reverseVideo) c <|> Vty.text' attr rest
+   in Vty.text' attr prefix <|> suffixImg <|> colorFix
 
 colorText :: (Attr -> Attr) -> (Maybe Vty.Color) -> Text -> Vty.Image
 colorText mod col txt = Vty.text' (mod $ maybe Vty.defAttr (Vty.withForeColor Vty.defAttr) col) txt <|> colorFix
@@ -297,16 +310,25 @@ bufferFrom = \case
 atom :: Text -> Vty.Image
 atom t = Vty.text' defAttr t
 
-prettyArray :: Int -> (Maybe Vty.Color -> Text -> Vty.Image) -> Vector Image -> Vty.Image
-prettyArray i img vs =
+prettyArray :: Int -> Focused -> Vector Image -> Vty.Image
+prettyArray i focused vs =
   let inner :: [Image] = indented 2 (Vector.toList vs)
-   in Vty.vertCat . indented i $ [img Nothing "["] ++ inner ++ [img Nothing "]"]
+   in Vty.vertCat . indented i $ [img "["] ++ inner ++ [img "]"]
+  where
+    img t = case focused of
+      Focused -> Vty.text' (Vty.withStyle Vty.defAttr Vty.reverseVideo) t <|> colorFix
+      NotFocused -> Vty.text' Vty.defAttr t <|> colorFix
 
-prettyObj :: Int -> (Maybe Vty.Color -> Text -> Vty.Image) -> HashMap Text Vty.Image -> Vty.Image
-prettyObj i img vs =
+
+prettyObj :: Int -> Focused -> HashMap Text Vty.Image -> Vty.Image
+prettyObj i focused vs =
   let inner :: [Image] = indented 2 (HM.foldrWithKey' (\k v a -> [Vty.string (Vty.withForeColor defAttr Vty.cyan) (show k) <|> Vty.text' defAttr ": ", v] ++ a) [] vs)
    in Vty.vertCat . indented i $
-        ([img Nothing "{"] ++ inner ++ [img Nothing "}"])
+        ([img "{"] ++ inner ++ [img "}"])
+  where
+    img t = case focused of
+      Focused -> Vty.text' (Vty.withStyle Vty.defAttr Vty.reverseVideo) t <|> colorFix
+      NotFocused -> Vty.text' Vty.defAttr t <|> colorFix
 
 colorFix :: Vty.Image
 colorFix = Vty.text' defAttr ""
@@ -341,7 +363,7 @@ toCofree t = go t
     go x =
       let rec = fmap toCofree (FF.project x)
           buf = bufferFromValueF $ FF.project x
-          img = renderSubtree id (FS mempty buf NoneState :< rec)
+          img = renderSubtree NotFocused (FS mempty buf NoneState :< rec)
           fs = FS img buf NoneState
        in fs :< rec
 
