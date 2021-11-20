@@ -36,6 +36,8 @@ dependencies:
 - aeson-pretty
 - bytestring
 - comonad
+- text-zipper
+- scientific
 
 library:
   source-dirs: src

@@ -27,6 +27,7 @@ library
   exposed-modules:
       Lib
       Pretty
+      TaggedCofree
   other-modules:
       Paths_structural_json
   hs-source-dirs:
@@ -44,7 +45,9 @@ library
     , mtl
     , recursion-schemes
     , recursion-zipper
+    , scientific
     , text
+    , text-zipper
     , unordered-containers
     , vector
     , vty
@@ -70,8 +73,10 @@ executable structural-json-exe
     , mtl
     , recursion-schemes
     , recursion-zipper
+    , scientific
     , structural-json
     , text
+    , text-zipper
     , unordered-containers
     , vector
     , vty
@@ -98,8 +103,10 @@ test-suite structural-json-test
     , mtl
     , recursion-schemes
     , recursion-zipper
+    , scientific
     , structural-json
     , text
+    , text-zipper
     , unordered-containers
     , vector
     , vty
