@@ -32,6 +32,24 @@ library
       Paths_structural_json
   hs-source-dirs:
       src
+  default-extensions:
+      FlexibleInstances
+      FlexibleContexts
+      ScopedTypeVariables
+      LambdaCase
+      ViewPatterns
+      TypeApplications
+      TypeOperators
+      DeriveFunctor
+      DeriveTraversable
+      DeriveGeneric
+      DerivingStrategies
+      StandaloneDeriving
+      TemplateHaskell
+      RankNTypes
+      GADTs
+      MultiParamTypeClasses
+  ghc-options: -Wall
   build-depends:
       aeson
     , aeson-extra
@@ -59,7 +77,24 @@ executable structural-json-exe
       Paths_structural_json
   hs-source-dirs:
       app
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  default-extensions:
+      FlexibleInstances
+      FlexibleContexts
+      ScopedTypeVariables
+      LambdaCase
+      ViewPatterns
+      TypeApplications
+      TypeOperators
+      DeriveFunctor
+      DeriveTraversable
+      DeriveGeneric
+      DerivingStrategies
+      StandaloneDeriving
+      TemplateHaskell
+      RankNTypes
+      GADTs
+      MultiParamTypeClasses
+  ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson
     , aeson-extra
@@ -89,7 +124,24 @@ test-suite structural-json-test
       Paths_structural_json
   hs-source-dirs:
       test
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N
+  default-extensions:
+      FlexibleInstances
+      FlexibleContexts
+      ScopedTypeVariables
+      LambdaCase
+      ViewPatterns
+      TypeApplications
+      TypeOperators
+      DeriveFunctor
+      DeriveTraversable
+      DeriveGeneric
+      DerivingStrategies
+      StandaloneDeriving
+      TemplateHaskell
+      RankNTypes
+      GADTs
+      MultiParamTypeClasses
+  ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       aeson
     , aeson-extra

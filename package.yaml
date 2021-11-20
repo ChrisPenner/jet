@@ -39,6 +39,27 @@ dependencies:
 - text-zipper
 - scientific
 
+default-extensions:
+- FlexibleInstances
+- FlexibleContexts
+- ScopedTypeVariables
+- LambdaCase
+- ViewPatterns
+- TypeApplications
+- TypeOperators
+- DeriveFunctor
+- DeriveTraversable
+- DeriveGeneric
+- DerivingStrategies
+- StandaloneDeriving
+- TemplateHaskell
+- RankNTypes
+- GADTs
+- MultiParamTypeClasses
+
+ghc-options:
+- -Wall
+
 library:
   source-dirs: src
 

@@ -9,7 +9,6 @@
 module TaggedCofree where
 
 import Data.HashMap.Strict (HashMap)
-import qualified Data.HashMap.Strict as HashMap
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Data.Text.Zipper (TextZipper)
@@ -30,21 +29,21 @@ data JsonK
 
 -- | Json base functor with constructor tag
 data TaggedJsonF (k :: JsonK) r where
-  ObjectT :: HashMap Text r -> TaggedJsonF ObjectK r
-  ArrayT :: Vector r -> TaggedJsonF ArrayK r
-  StringT :: Text -> TaggedJsonF StringK r
-  NumberT :: Scientific -> TaggedJsonF NumberK r
-  BoolT :: Bool -> TaggedJsonF BoolK r
-  NullT :: TaggedJsonF NullK r
+  ObjectT :: HashMap Text r -> TaggedJsonF 'ObjectK r
+  ArrayT :: Vector r -> TaggedJsonF 'ArrayK r
+  StringT :: Text -> TaggedJsonF 'StringK r
+  NumberT :: Scientific -> TaggedJsonF 'NumberK r
+  BoolT :: Bool -> TaggedJsonF 'BoolK r
+  NullT :: TaggedJsonF 'NullK r
 
 -- | State required by the structural editor at each node.
 data StructuralEditingBuffer (k :: JsonK) where
-  ObjectS :: Maybe (Text, TextZipper Text) -> StructuralEditingBuffer ObjectK
-  ArrayS :: StructuralEditingBuffer ArrayK
-  StringS :: Text -> StructuralEditingBuffer StringK
-  NumberS :: TextZipper Text -> StructuralEditingBuffer NumberK
-  BoolS :: Bool -> StructuralEditingBuffer BoolK
-  NullS :: StructuralEditingBuffer NullK
+  ObjectS :: Maybe (Text, TextZipper Text) -> StructuralEditingBuffer 'ObjectK
+  ArrayS :: StructuralEditingBuffer 'ArrayK
+  StringS :: Text -> StructuralEditingBuffer 'StringK
+  NumberS :: TextZipper Text -> StructuralEditingBuffer 'NumberK
+  BoolS :: Bool -> StructuralEditingBuffer 'BoolK
+  NullS :: StructuralEditingBuffer 'NullK
 
 -- Fold a Tagged Cofree from bottom up with type-indexed state.
 fold ::

@@ -12,15 +12,14 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 
-module Lib where
+module Lib (run) where
 
 import qualified Control.Comonad as Comonad
 import Control.Comonad.Cofree
 import qualified Control.Comonad.Cofree as Cofree
 import Control.Lens hiding ((:<))
-import Control.Monad
 import Control.Monad.State
-import Data.Aeson (Value (String))
+import Data.Aeson (Value)
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Extra
 import qualified Data.ByteString.Lazy.Char8 as BS
@@ -31,7 +30,6 @@ import qualified Data.List as List
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import Data.Text.Zipper as TZ
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
@@ -40,7 +38,7 @@ import qualified Graphics.Vty as Vty
 import Text.Read (readMaybe)
 import qualified Zipper as Z
 import Data.Aeson.Encode.Pretty (encodePretty)
-import Data.Bifunctor (first, Bifunctor (second))
+import Data.Bifunctor (Bifunctor (second))
 
 type Buffer = TZ.TextZipper Text
 
@@ -108,8 +106,8 @@ updateValF z =
   let txt = z ^. buffer_ Focused . to bufferText
    in z & Z.unwrapped_ . _unwrap
         %~ ( \case
-               o@(ObjectF hm) -> o
-               a@(ArrayF vec) -> a
+               o@(ObjectF _hm) -> o
+               a@(ArrayF _vec) -> a
                StringF _ -> StringF txt
                (NumberF n) -> NumberF . fromMaybe n . readMaybe $ Text.unpack txt
                BoolF b -> BoolF . fromMaybe b . readMaybe $ Text.unpack txt
@@ -119,8 +117,8 @@ updateValF z =
 
 valueFText :: Traversal' (ValueF x) Text
 valueFText f = \case
-  v@(ObjectF hm) -> pure v
-  v@(ArrayF vec) -> pure v
+  v@(ObjectF _hm) -> pure v
+  v@(ArrayF _vec) -> pure v
   StringF txt -> StringF <$> f txt
   v@(NumberF sci) -> f (Text.pack . show $ sci) <&> \n -> case readMaybe (Text.unpack n) of
     Nothing -> v
@@ -137,7 +135,7 @@ handleEvent mode z e =
   case mode of
     Edit ->
       case e of
-        EvKey key mods ->
+        EvKey key _mods ->
           case key of
             KChar c -> (mode, z & buffer_ Focused %~ TZ.insertChar c)
             KBS -> (mode, z & buffer_ Focused %~ TZ.deletePrevChar)
@@ -147,7 +145,7 @@ handleEvent mode z e =
         _ -> (mode, z)
     Move ->
       case e of
-        EvKey key mods -> case key of
+        EvKey key _mods -> case key of
           KChar 'h' -> (mode, z & rerenderFocus NotFocused & Z.tug Z.up)
           KChar 'l' -> (mode, z & rerenderFocus NotFocused & into)
           KChar 'j' -> (mode, z & rerenderFocus NotFocused & nextSibling)
@@ -155,13 +153,6 @@ handleEvent mode z e =
           KChar 'i' -> (Edit, z)
           _ -> (mode, z)
         _ -> (mode, z)
-
--- editor :: Vty.Event -> Buffer -> Maybe Buffer
--- editor e z =
---   case e of
---     EvKey key mods -> case key of
---       KEsc -> pure $ Z.tug Z.up z
---       KChar 'h' -> pure $ Z.tug Z.up z
 
 nextSibling :: Z.Zipper ValueF a -> Z.Zipper ValueF a
 nextSibling z = fromMaybe z $ do
@@ -295,21 +286,6 @@ renderBuffer Focused attr buf =
         Just (c, rest) -> Vty.char (Vty.withStyle attr Vty.reverseVideo) c <|> Vty.text' attr rest
    in Vty.text' attr prefix <|> suffixImg <|> colorFix
 
-colorText :: (Attr -> Attr) -> (Maybe Vty.Color) -> Text -> Vty.Image
-colorText mod col txt = Vty.text' (mod $ maybe Vty.defAttr (Vty.withForeColor Vty.defAttr) col) txt <|> colorFix
-
-bufferFrom :: ValueF FocusState -> TextZipper Text
-bufferFrom = \case
-  ObjectF hm -> TZ.textZipper [] Nothing
-  ArrayF vec -> TZ.textZipper [] Nothing
-  StringF txt -> TZ.textZipper (Text.lines txt) Nothing
-  NumberF n -> TZ.textZipper [Text.pack $ show n] Nothing
-  BoolF b -> TZ.textZipper [Text.pack $ show b] Nothing
-  NullF -> TZ.textZipper [Text.pack $ "null"] Nothing
-
-atom :: Text -> Vty.Image
-atom t = Vty.text' defAttr t
-
 prettyArray :: Int -> Focused -> Vector Image -> Vty.Image
 prettyArray i focused vs =
   let inner :: [Image] = indented 2 (Vector.toList vs)
@@ -338,12 +314,6 @@ indented n xs = (indentLine n) <$> xs
 
 indentLine :: Int -> Vty.Image -> Vty.Image
 indentLine n x = (Vty.text' (Vty.withForeColor defAttr Vty.brightBlack) $ " " <> Text.replicate (n - 1) " ") <|> x
-
-project :: Value -> Z.Zipper ValueF ()
-project = Z.zipper . asCofree
-
-asCofree :: Value -> Cofree ValueF ()
-asCofree = Cofree.unfold (((),) . FF.project)
 
 data JIndex
   = Index Int
