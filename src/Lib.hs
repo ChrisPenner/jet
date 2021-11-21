@@ -377,7 +377,10 @@ renderSubtree rs@(foc, _) z = case (z ^. Cofree._unwrap, z ^. Cofree._extract . 
     i = 2
 
 reverseCol :: Color -> AnsiStyle
-reverseCol = bgColor
+reverseCol = \case
+  White -> colorDull Black <> bgColorDull White
+  Green -> colorDull Black <> bgColorDull Green
+  c -> bgColorDull c
 
 prettyWith :: Pretty a => ann -> a -> Doc ann
 prettyWith ann a = annotate ann $ pretty a
@@ -402,7 +405,7 @@ prettyArray rs vs =
   where
     img :: Text -> PrettyJSON
     img t = case rs of
-      (Focused, _) -> prettyWith (reverseCol Black) t
+      (Focused, _) -> prettyWith (reverseCol White) t
       (NotFocused, _) -> pretty t
 
 prettyObj :: Maybe (Buffer, Text) -> RenderState -> HashMap Text PrettyJSON -> PrettyJSON
