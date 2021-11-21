@@ -26,11 +26,11 @@ import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.Aeson.Extra
 import Data.Bifunctor (Bifunctor (second))
 import qualified Data.ByteString.Lazy.Char8 as BS
-import Data.Foldable
 import qualified Data.Functor.Foldable as FF
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
 import qualified Data.HashMap.Strict as HashMap
+import Data.Hashable (Hashable)
 import qualified Data.List as List
 import Data.Maybe
 import Data.Text (Text)
@@ -42,7 +42,8 @@ import Graphics.Vty
 import qualified Graphics.Vty as Vty
 import Text.Read (readMaybe)
 import qualified Zipper as Z
-import Data.Hashable (Hashable)
+import System.Environment (getArgs)
+import System.Exit (exitFailure)
 
 type Buffer = TZ.TextZipper Text
 
@@ -75,28 +76,34 @@ selectedKey_ f z =
 
 run :: IO ()
 run = do
-  result <- edit $ fromJust $ Aeson.decode ("[\"hi\", {\"testing\":[1, 2, false, null], \"other\":true}, [4, 5, 6]]")
+  json <- getArgs >>= \case
+    -- [] -> Aeson.decode . BS.pack <$> getContents
+    [f] -> Aeson.decodeFileStrict f
+    _ -> exitFailure
+  result <- edit $ fromJust $ json
+  -- result <- edit $ fromJust $ Aeson.decode ("[\"hi\", {\"testing\":[1, 2, false, null], \"other\":true}, [4, 5, 6]]")
   BS.putStrLn $ encodePretty result
 
 edit :: Value -> IO Value
 edit value = do
   config <- liftIO $ standardIOConfig
   vty <- liftIO $ mkVty config
-  let start = fromJust $ (Z.down (Index 0)) . Z.zipper . toCofree $ value
-  let loop mode foc = do
-        liftIO $ update vty . Vty.picForImage $ renderValue' (Focused, mode) foc
+  let start = Z.zipper . toCofree $ value
+  let loop mode prevZ z = do
+        liftIO $ update vty . Vty.picForImage $ renderValue' (Focused, mode) z
         e <- liftIO $ nextEvent vty
-        let (mode', foc') = handleEvent mode foc e & second (rerenderFocus (Focused, mode))
+        let (mode', foc') = handleEvent mode prevZ z e & second (rerenderFocus (Focused, mode))
         if (maybeQuit e)
           then pure foc'
-          else (loop mode' foc')
-  v <- loop Move start
+          else (loop mode' z foc')
+  v <- loop Move start start
   liftIO $ Vty.shutdown vty
   pure (Z.flatten v)
 
 maybeQuit :: Vty.Event -> Bool
 maybeQuit = \case
   EvKey (KChar 'c') [Vty.MCtrl] -> True
+  EvKey (KChar 'q') [] -> True
   _ -> False
 
 bufferText :: Buffer -> Text
@@ -139,16 +146,25 @@ valueFText f = \case
     f (Text.pack . show $ sci) <&> \n -> case readMaybe (Text.unpack n) of
       Nothing -> v
       Just n' -> NumberF n'
-  v@(BoolF b) ->
-    f (Text.pack . show $ b) <&> \b' -> case readMaybe (Text.unpack b') of
-      Nothing -> v
-      Just b'' -> BoolF b''
+  (BoolF b) -> pure (BoolF b)
+  -- f (Text.pack . show $ b) <&> \b' -> case readMaybe (Text.unpack b') of
+  --   Nothing -> v
+  --   Just b'' -> BoolF b''
   NullF -> pure NullF
+
+boolText_ :: Prism' Text Bool
+boolText_ = prism' toText toBool
+  where
+    toText True = "true"
+    toText False = "false"
+    toBool "true" = Just True
+    toBool "false" = Just False
+    toBool _ = Nothing
 
 data ZMode = Edit | Move
 
-handleEvent :: ZMode -> Z.Zipper ValueF FocusState -> Vty.Event -> (ZMode, Z.Zipper ValueF FocusState)
-handleEvent mode z e =
+handleEvent :: ZMode -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState -> Vty.Event -> (ZMode, Z.Zipper ValueF FocusState)
+handleEvent mode prevZ z e =
   case mode of
     Edit ->
       case e of
@@ -159,7 +175,7 @@ handleEvent mode z e =
             KRight -> (mode, z & buffer_ (Focused, mode) %~ TZ.moveRight)
             KBS -> (mode, z & buffer_ (Focused, mode) %~ TZ.deletePrevChar)
             KEsc -> do
-              (Move, updateValF (Focused, Move) z)
+              (Move, z & updateValF (Focused, Move) & \z -> z & buffer_ (Focused, Move) .~ bufferFromValueF (Z.branches z))
             _ -> (mode, z)
         _ -> (mode, z)
     Move ->
@@ -169,9 +185,36 @@ handleEvent mode z e =
           KChar 'l' -> (mode, z & rerenderFocus (NotFocused, mode) & into)
           KChar 'j' -> (mode, z & rerenderFocus (NotFocused, mode) & nextSibling)
           KChar 'k' -> (mode, z & rerenderFocus (NotFocused, mode) & prevSibling)
-          KChar 'i' -> (Edit, z)
+          KChar 'i' | canEdit z -> (Edit, z)
+          KChar 'b' -> (mode, z & setFocus (BoolF True))
+          KChar 'o' -> (mode, z & setFocus (ObjectF mempty))
+          KChar 'a' -> (mode, z & setFocus (ArrayF mempty))
+          KChar 'n' -> (mode, z & setFocus (NumberF 0))
+          KChar 's' -> (mode, z & setFocus (StringF ""))
+          KChar 't' -> (mode, z & setFocus (StringF ""))
+          KChar 'u' -> (mode, prevZ)
+          KChar ' ' -> (mode, z & tryToggle)
           _ -> (mode, z)
         _ -> (mode, z)
+
+setFocus :: ValueF (Cofree ValueF FocusState) -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
+setFocus f z = z & Z.branches_ .~ f & buffer_ (Focused, Move) .~ newBuffer ""
+
+tryToggle :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
+tryToggle z = z & Z.branches_ %~ \case
+   BoolF b -> BoolF (not b)
+   x -> x
+
+canEdit :: Z.Zipper ValueF FocusState -> Bool
+canEdit z = case Z.branches z of
+  StringF {} -> True
+  NumberF {} -> True
+  ObjectF {}
+    | Just _ <- z ^. selectedKey_ -> True
+    | otherwise -> False
+  ArrayF {} -> False
+  BoolF {} -> False
+  NullF -> False
 
 nextSibling :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 nextSibling z = fromMaybe z $ do
@@ -307,15 +350,17 @@ data Focused = Focused | NotFocused
   deriving (Eq)
 
 renderSubtree :: RenderState -> Cofree ValueF FocusState -> Vty.Image
-renderSubtree rs z = case (z ^. Cofree._unwrap, z ^. Cofree._extract . selectedKey) of
+renderSubtree rs@(foc, _) z = case (z ^. Cofree._unwrap, z ^. Cofree._extract . selectedKey) of
   (StringF _, _) -> indentLine i (colored green "\"" <|> bufImg green <|> colored green "\",")
   (NullF, _) -> indentLine i (colored Vty.yellow "null,")
   (NumberF _, _) -> indentLine i (bufImg blue <|> colored blue ",")
-  (BoolF _, _) -> indentLine i (bufImg magenta <|> colored blue ",")
+  (BoolF b, _) -> indentLine i (colored magenta (boolText_ # b) <|> Vty.char defAttr ',')
   (ArrayF xs, _) -> prettyArray i rs (renderChildren xs)
   (ObjectF xs, _) -> prettyObj i ((z ^. Cofree._extract . buffer,) <$> focusedKey) rs (renderChildren xs)
   where
-    colored col = Vty.text' (Vty.withForeColor Vty.defAttr col)
+    colored col txt =
+      Vty.text' (Vty.defAttr `Vty.withForeColor` col `Vty.withStyle` if foc == Focused then Vty.reverseVideo else Vty.defaultStyleMask) txt
+        <|> colorFix
     focusedKey :: Maybe Text
     focusedKey = z ^. Cofree._extract . selectedKey
     bufImg :: Vty.Color -> Image
@@ -358,11 +403,12 @@ prettyObj i focusedKey rs@(foc, _mode) vs =
    in Vty.vertCat . indented i $
         ([img "{"] ++ inner ++ [img "},"])
   where
+    color = defAttr `withForeColor` cyan
     imgForKey k
       | Just (buf, fk) <- focusedKey,
         fk == k && foc == Focused =
-        renderBuffer rs (defAttr `withForeColor` cyan `withStyle` reverseVideo) buf
-      | otherwise = Vty.string (defAttr `withForeColor` cyan) (show k)
+        Vty.char color '"' <|> renderBuffer rs color buf <|> Vty.char color '"' <|> colorFix
+      | otherwise = Vty.string color (show k)
     img t = case foc of
       Focused
         | Nothing <- focusedKey -> Vty.text' (Vty.withStyle Vty.defAttr Vty.reverseVideo) t <|> colorFix
@@ -398,5 +444,6 @@ toCofree t = go t
           img = renderSubtree (NotFocused, Move) (FS mempty buf Nothing :< rec)
           fs = FS img buf Nothing
        in fs :< rec
-    bufferFromValueF :: ValueF x -> Buffer
-    bufferFromValueF v = newBuffer $ v ^. valueFText
+
+bufferFromValueF :: ValueF x -> Buffer
+bufferFromValueF v = newBuffer $ v ^. valueFText
