@@ -42,6 +42,7 @@ import Graphics.Vty
 import qualified Graphics.Vty as Vty
 import Text.Read (readMaybe)
 import qualified Zipper as Z
+import Data.Hashable (Hashable)
 
 type Buffer = TZ.TextZipper Text
 
@@ -70,7 +71,7 @@ buffer_ rs f z =
 selectedKey_ :: Lens' (Z.Zipper ValueF FocusState) (Maybe Text)
 selectedKey_ f z =
   z & Z.focus_ %%~ \fs -> do
-    f (_selectedKey fs) <&> \newKey -> fs {_selectedKey = newKey, _buffer = newBuffer (fold newKey)}
+    f (_selectedKey fs) <&> \newKey -> fs {_selectedKey = newKey, _buffer = maybe (_buffer fs) newBuffer newKey}
 
 run :: IO ()
 run = do
@@ -109,8 +110,8 @@ updateValF rs z =
   let txt = z ^. buffer_ rs . to bufferText
    in z & Z.unwrapped_ . _unwrap
         %~ ( \case
-               o@(ObjectF _hm)
-                 | Just k <- z ^. selectedKey_ -> o
+               o@(ObjectF hm)
+                 | Just k <- z ^. selectedKey_ -> ObjectF $ renameKey k txt hm
                  | otherwise -> o
                a@(ArrayF _vec) -> a
                StringF _ -> StringF txt
@@ -118,9 +119,10 @@ updateValF rs z =
                BoolF b -> BoolF . fromMaybe b . readMaybe $ Text.unpack txt
                NullF -> NullF
            )
+        & selectedKey_ . _Just .~ txt
         & rerenderFocus rs
 
-renameKey :: Hashable k => k -> k -> HashMap k v -> HashMap k v
+renameKey :: (Hashable k, Eq k) => k -> k -> HashMap k v -> HashMap k v
 renameKey srcKey destKey hm =
   hm
     &~ do
