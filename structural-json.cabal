@@ -59,6 +59,7 @@ library
     , comonad
     , containers
     , free
+    , hashable
     , lens
     , mtl
     , recursion-schemes
@@ -104,6 +105,7 @@ executable structural-json-exe
     , comonad
     , containers
     , free
+    , hashable
     , lens
     , mtl
     , recursion-schemes
@@ -151,6 +153,7 @@ test-suite structural-json-test
     , comonad
     , containers
     , free
+    , hashable
     , lens
     , mtl
     , recursion-schemes

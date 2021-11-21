@@ -38,6 +38,7 @@ dependencies:
 - comonad
 - text-zipper
 - scientific
+- hashable
 
 default-extensions:
 - FlexibleInstances

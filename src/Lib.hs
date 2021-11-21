@@ -1,3 +1,4 @@
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE LambdaCase #-}
@@ -25,6 +26,7 @@ import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.Aeson.Extra
 import Data.Bifunctor (Bifunctor (second))
 import qualified Data.ByteString.Lazy.Char8 as BS
+import Data.Foldable
 import qualified Data.Functor.Foldable as FF
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
@@ -51,6 +53,9 @@ data FocusState = FS
 
 makeLenses ''FocusState
 
+focusState_ :: Lens' (Z.Zipper ValueF FocusState) FocusState
+focusState_ = Z.focus_
+
 -- Traversal into the buffer that also updates the rendered images on the focus.
 buffer_ :: RenderState -> Traversal' (Z.Zipper ValueF FocusState) (TZ.TextZipper Text)
 buffer_ rs f z =
@@ -62,8 +67,10 @@ buffer_ rs f z =
           then z
           else rerenderFocus rs (z & Z.focus_ . buffer .~ after)
 
-selectedKey_ :: Traversal' (Z.Zipper ValueF FocusState) (Maybe Text)
-selectedKey_ = Z.focus_ . selectedKey
+selectedKey_ :: Lens' (Z.Zipper ValueF FocusState) (Maybe Text)
+selectedKey_ f z =
+  z & Z.focus_ %%~ \fs -> do
+    f (_selectedKey fs) <&> \newKey -> fs {_selectedKey = newKey, _buffer = newBuffer (fold newKey)}
 
 run :: IO ()
 run = do
@@ -94,12 +101,17 @@ maybeQuit = \case
 bufferText :: Buffer -> Text
 bufferText = Text.concat . TZ.getText
 
+bufferText_ :: Getter (Z.Zipper ValueF FocusState) Text
+bufferText_ = Z.focus_ . buffer . to bufferText
+
 updateValF :: RenderState -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 updateValF rs z =
   let txt = z ^. buffer_ rs . to bufferText
    in z & Z.unwrapped_ . _unwrap
         %~ ( \case
-               o@(ObjectF _hm) -> o
+               o@(ObjectF _hm)
+                 | Just k <- z ^. selectedKey_ -> o
+                 | otherwise -> o
                a@(ArrayF _vec) -> a
                StringF _ -> StringF txt
                (NumberF n) -> NumberF . fromMaybe n . readMaybe $ Text.unpack txt
@@ -107,6 +119,14 @@ updateValF rs z =
                NullF -> NullF
            )
         & rerenderFocus rs
+
+renameKey :: Hashable k => k -> k -> HashMap k v -> HashMap k v
+renameKey srcKey destKey hm =
+  hm
+    &~ do
+      v <- use (at srcKey)
+      at srcKey .= Nothing
+      at destKey .= v
 
 valueFText :: Traversal' (ValueF x) Text
 valueFText f = \case
@@ -155,7 +175,7 @@ nextSibling :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 nextSibling z = fromMaybe z $ do
   case (Z.branches z, z ^. selectedKey_) of
     (ObjectF hm, Just k) -> do
-      prevKey <- prevInList k $ HashMap.keys hm
+      prevKey <- nextInList k $ HashMap.keys hm
       pure $ z & selectedKey_ ?~ prevKey
     _ -> do
       parent <- Z.up z
@@ -179,17 +199,17 @@ nextSibling z = fromMaybe z $ do
           fstI <- getFirstIdx (Z.branches next)
           Z.down fstI next
 
-prevInList :: Eq a => a -> [a] -> Maybe a
-prevInList a xs = fmap snd . List.find ((== a) . fst) $ zip xs (drop 1 xs)
-
 nextInList :: Eq a => a -> [a] -> Maybe a
-nextInList a xs = fmap snd . List.find ((== a) . fst) $ zip (drop 1 xs) xs
+nextInList a xs = fmap snd . List.find ((== a) . fst) $ zip xs (drop 1 xs)
+
+prevInList :: Eq a => a -> [a] -> Maybe a
+prevInList a xs = fmap snd . List.find ((== a) . fst) $ zip (drop 1 xs) xs
 
 prevSibling :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 prevSibling z = fromMaybe z $ do
   case (Z.branches z, z ^. selectedKey_) of
     (ObjectF hm, Just k) -> do
-      nextKey <- nextInList k $ HashMap.keys hm
+      nextKey <- prevInList k $ HashMap.keys hm
       pure $ z & selectedKey_ ?~ nextKey
     _ -> do
       parent <- Z.up z
@@ -244,7 +264,7 @@ into z =
       Z.tug (Z.down (Key key)) z
     (ObjectF hm, Nothing) -> do
       let fstKey = (HM.keys hm) ^? _head
-      z & selectedKey_ .~ fstKey
+      z & selectedKey_ .~ fstKey -- & buffer_ (Focused, Move) .~ newBuffer (fromMaybe "" fstKey)
     (ArrayF {}, _) ->
       fromMaybe z $ do
         Z.down (Index 0) z
@@ -256,8 +276,11 @@ into z =
 outOf :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 outOf z =
   case (Z.branches z, z ^. selectedKey_) of
-    (ObjectF _, Just _) -> do
+    (ObjectF _, Just k) -> do
       z & selectedKey_ .~ Nothing
+        & Z.branches_ %~ \case
+          ObjectF hm -> ObjectF $ renameKey k (z ^. bufferText_) hm
+          _ -> error "expected object"
     _ -> Z.tug Z.up z
 
 renderValue' :: RenderState -> Z.Zipper ValueF FocusState -> Image
@@ -334,8 +357,9 @@ prettyObj i focusedKey rs@(foc, _mode) vs =
         ([img "{"] ++ inner ++ [img "},"])
   where
     imgForKey k
-      | Just (buf, fk) <- focusedKey, fk == k && foc == Focused =
-         renderBuffer rs (defAttr `withForeColor` cyan `withStyle` reverseVideo) buf
+      | Just (buf, fk) <- focusedKey,
+        fk == k && foc == Focused =
+        renderBuffer rs (defAttr `withForeColor` cyan `withStyle` reverseVideo) buf
       | otherwise = Vty.string (defAttr `withForeColor` cyan) (show k)
     img t = case foc of
       Focused
