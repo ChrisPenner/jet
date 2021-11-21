@@ -28,6 +28,7 @@ import qualified Data.ByteString.Lazy.Char8 as BS
 import qualified Data.Functor.Foldable as FF
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
+import qualified Data.HashMap.Strict as HashMap
 import qualified Data.List as List
 import Data.Maybe
 import Data.Text (Text)
@@ -42,18 +43,13 @@ import qualified Zipper as Z
 
 type Buffer = TZ.TextZipper Text
 
-data NodeState
-  = ObjKey {_selectedKey :: Text}
-  | NoneState
-
 data FocusState = FS
   { _rendered :: Vty.Image,
-    _buffer :: TZ.TextZipper Text,
-    _nodeState :: NodeState
+    _buffer :: Buffer,
+    _selectedKey :: Maybe Text
   }
 
 makeLenses ''FocusState
-makeLenses ''NodeState
 
 -- Traversal into the buffer that also updates the rendered images on the focus.
 buffer_ :: RenderState -> Traversal' (Z.Zipper ValueF FocusState) (TZ.TextZipper Text)
@@ -66,15 +62,12 @@ buffer_ rs f z =
           then z
           else rerenderFocus rs (z & Z.focus_ . buffer .~ after)
 
-selectedKey_ :: Traversal' (Z.Zipper ValueF FocusState) Text
-selectedKey_ = Z.focus_ . nodeState . selectedKey
-
-nodeState_ :: Traversal' (Z.Zipper ValueF FocusState) NodeState
-nodeState_ = Z.focus_ . nodeState
+selectedKey_ :: Traversal' (Z.Zipper ValueF FocusState) (Maybe Text)
+selectedKey_ = Z.focus_ . selectedKey
 
 run :: IO ()
 run = do
-  result <- edit $ fromJust $ Aeson.decode ("[\"hi\", {\"testing\":[1, 2, false, null]}, [4, 5, 6]]")
+  result <- edit $ fromJust $ Aeson.decode ("[\"hi\", {\"testing\":[1, 2, false, null], \"other\":true}, [4, 5, 6]]")
   BS.putStrLn $ encodePretty result
 
 edit :: Value -> IO Value
@@ -83,7 +76,7 @@ edit value = do
   vty <- liftIO $ mkVty config
   let start = fromJust $ (Z.down (Index 0)) . Z.zipper . toCofree $ value
   let loop mode foc = do
-        liftIO $ update vty . Vty.picForImage $ renderValue' (Focused, mode)foc
+        liftIO $ update vty . Vty.picForImage $ renderValue' (Focused, mode) foc
         e <- liftIO $ nextEvent vty
         let (mode', foc') = handleEvent mode foc e & second (rerenderFocus (Focused, mode))
         if (maybeQuit e)
@@ -150,7 +143,7 @@ handleEvent mode z e =
     Move ->
       case e of
         EvKey key _mods -> case key of
-          KChar 'h' -> (mode, z & rerenderFocus (NotFocused,mode) & Z.tug Z.up)
+          KChar 'h' -> (mode, z & rerenderFocus (NotFocused, mode) & outOf)
           KChar 'l' -> (mode, z & rerenderFocus (NotFocused, mode) & into)
           KChar 'j' -> (mode, z & rerenderFocus (NotFocused, mode) & nextSibling)
           KChar 'k' -> (mode, z & rerenderFocus (NotFocused, mode) & prevSibling)
@@ -158,52 +151,68 @@ handleEvent mode z e =
           _ -> (mode, z)
         _ -> (mode, z)
 
-nextSibling :: Z.Zipper ValueF a -> Z.Zipper ValueF a
+nextSibling :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 nextSibling z = fromMaybe z $ do
-  parent <- Z.up z
-  curI <- Z.currentIndex z
-  let newI = case Z.branches parent of
-        ObjectF hm -> do
-          let keys = HM.keys hm
-          (_, newKey) <- List.find ((curI ==) . Key . fst) (zip keys (drop 1 $ keys))
-          pure $ Key newKey
-        ArrayF xs -> case curI of
-          (Index i) | i < (length xs - 1) -> pure . Index $ i + 1
-          _ -> Nothing
-        StringF {} -> Nothing
-        NumberF {} -> Nothing
-        BoolF {} -> Nothing
-        NullF -> Nothing
-  case newI of
-    Just i -> Z.down i parent
-    Nothing -> do
-      next <- nextSibling <$> Z.up z
-      fstI <- getFirstIdx (Z.branches next)
-      Z.down fstI next
+  case (Z.branches z, z ^. selectedKey_) of
+    (ObjectF hm, Just k) -> do
+      prevKey <- prevInList k $ HashMap.keys hm
+      pure $ z & selectedKey_ ?~ prevKey
+    _ -> do
+      parent <- Z.up z
+      curI <- Z.currentIndex z
+      let newI = case Z.branches parent of
+            ObjectF hm -> do
+              let keys = HM.keys hm
+              (_, newKey) <- List.find ((curI ==) . Key . fst) (zip keys (drop 1 $ keys))
+              pure $ Key newKey
+            ArrayF xs -> case curI of
+              (Index i) | i < (length xs - 1) -> pure . Index $ i + 1
+              _ -> Nothing
+            StringF {} -> Nothing
+            NumberF {} -> Nothing
+            BoolF {} -> Nothing
+            NullF -> Nothing
+      case newI of
+        Just i -> Z.down i parent
+        Nothing -> do
+          next <- nextSibling <$> Z.up z
+          fstI <- getFirstIdx (Z.branches next)
+          Z.down fstI next
 
-prevSibling :: Z.Zipper ValueF a -> Z.Zipper ValueF a
+prevInList :: Eq a => a -> [a] -> Maybe a
+prevInList a xs = fmap snd . List.find ((== a) . fst) $ zip xs (drop 1 xs)
+
+nextInList :: Eq a => a -> [a] -> Maybe a
+nextInList a xs = fmap snd . List.find ((== a) . fst) $ zip (drop 1 xs) xs
+
+prevSibling :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 prevSibling z = fromMaybe z $ do
-  parent <- Z.up z
-  curI <- Z.currentIndex z
-  let newI = case Z.branches parent of
-        ObjectF hm -> do
-          let keys = HM.keys hm
-          (newKey, _) <- List.find ((curI ==) . Key . snd) (zip keys (drop 1 $ keys))
-          pure $ Key newKey
-        ArrayF _ -> case curI of
-          (Index 0) -> Nothing
-          (Index i) -> pure . Index $ i - 1
-          _ -> Nothing
-        StringF {} -> Nothing
-        NumberF {} -> Nothing
-        BoolF {} -> Nothing
-        NullF -> Nothing
-  case newI of
-    Just i -> Z.down i parent
-    Nothing -> do
-      prev <- prevSibling <$> Z.up z
-      lastI <- getLastIdx (Z.branches prev)
-      Z.down lastI prev
+  case (Z.branches z, z ^. selectedKey_) of
+    (ObjectF hm, Just k) -> do
+      nextKey <- nextInList k $ HashMap.keys hm
+      pure $ z & selectedKey_ ?~ nextKey
+    _ -> do
+      parent <- Z.up z
+      curI <- Z.currentIndex z
+      let newI = case Z.branches parent of
+            ObjectF hm -> do
+              let keys = HM.keys hm
+              (newKey, _) <- List.find ((curI ==) . Key . snd) (zip keys (drop 1 $ keys))
+              pure $ Key newKey
+            ArrayF _ -> case curI of
+              (Index 0) -> Nothing
+              (Index i) -> pure . Index $ i - 1
+              _ -> Nothing
+            StringF {} -> Nothing
+            NumberF {} -> Nothing
+            BoolF {} -> Nothing
+            NullF -> Nothing
+      case newI of
+        Just i -> Z.down i parent
+        Nothing -> do
+          prev <- prevSibling <$> Z.up z
+          lastI <- getLastIdx (Z.branches prev)
+          Z.down lastI prev
 
 getFirstIdx :: ValueF x -> Maybe JIndex
 getFirstIdx = \case
@@ -230,30 +239,34 @@ newBuffer txt = TZ.gotoEOF $ TZ.textZipper (Text.lines txt) Nothing
 
 into :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 into z =
-  case (Z.branches z) of
-    (ObjectF hm) -> do
+  case (Z.branches z, z ^. selectedKey_) of
+    (ObjectF _, Just key) -> do
+      Z.tug (Z.down (Key key)) z
+    (ObjectF hm, Nothing) -> do
       let fstKey = (HM.keys hm) ^? _head
-      case z ^? selectedKey_ of
-        Nothing -> do
-          case fstKey of
-            Nothing -> z
-            Just k -> z & nodeState_ .~ ObjKey k
-        Just k -> Z.tug (Z.down (Key k)) z
-    ArrayF {} ->
+      z & selectedKey_ .~ fstKey
+    (ArrayF {}, _) ->
       fromMaybe z $ do
         Z.down (Index 0) z
-    StringF {} -> z
-    NumberF {} -> z
-    BoolF {} -> z
-    NullF -> z
+    (StringF {}, _) -> z
+    (NumberF {}, _) -> z
+    (BoolF {}, _) -> z
+    (NullF, _) -> z
+
+outOf :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
+outOf z =
+  case (Z.branches z, z ^. selectedKey_) of
+    (ObjectF _, Just _) -> do
+      z & selectedKey_ .~ Nothing
+    _ -> Z.tug Z.up z
 
 renderValue' :: RenderState -> Z.Zipper ValueF FocusState -> Image
-renderValue' (foc,mode) z =
+renderValue' (foc, mode) z =
   Z.foldSpine alg $ (_rendered <$> rerenderFocus (foc, mode) z)
   where
     alg :: Image -> ValueF Image -> Image
     alg img = \case
-      ObjectF hm -> prettyObj 2 (NotFocused, mode) hm
+      ObjectF hm -> prettyObj 2 Nothing (NotFocused, mode) hm
       ArrayF vec -> prettyArray 2 (NotFocused, mode) vec
       StringF {} -> img
       NumberF {} -> img
@@ -266,17 +279,20 @@ rerenderFocus rs z = z & Z.focus_ . rendered .~ renderSubtree rs (z ^. Z.unwrapp
 type RenderState = (Focused, ZMode)
 
 data Focused = Focused | NotFocused
+  deriving (Eq)
 
 renderSubtree :: RenderState -> Cofree ValueF FocusState -> Vty.Image
-renderSubtree rs z = case z ^. Cofree._unwrap of
-  StringF _ -> indentLine i (colored green "\"" <|> bufImg green <|> colored green "\",")
-  NullF -> indentLine i (colored Vty.yellow "null,")
-  (NumberF _) -> indentLine i (bufImg blue <|> colored blue ",")
-  (BoolF _) -> indentLine i (bufImg magenta <|> colored blue ",")
-  (ArrayF xs) -> prettyArray i rs (renderChildren xs)
-  (ObjectF xs) -> prettyObj i rs (renderChildren xs)
+renderSubtree rs z = case (z ^. Cofree._unwrap, z ^. Cofree._extract . selectedKey) of
+  (StringF _, _) -> indentLine i (colored green "\"" <|> bufImg green <|> colored green "\",")
+  (NullF, _) -> indentLine i (colored Vty.yellow "null,")
+  (NumberF _, _) -> indentLine i (bufImg blue <|> colored blue ",")
+  (BoolF _, _) -> indentLine i (bufImg magenta <|> colored blue ",")
+  (ArrayF xs, _) -> prettyArray i rs (renderChildren xs)
+  (ObjectF xs, _) -> prettyObj i ((z ^. Cofree._extract . buffer,) <$> focusedKey) rs (renderChildren xs)
   where
     colored col = Vty.text' (Vty.withForeColor Vty.defAttr col)
+    focusedKey :: Maybe Text
+    focusedKey = z ^. Cofree._extract . selectedKey
     bufImg :: Vty.Color -> Image
     bufImg col = renderBuffer rs (Vty.defAttr `Vty.withForeColor` col) $ z ^. Cofree._extract . buffer
     renderChildren :: (Functor g, Functor f) => f (Cofree g FocusState) -> f Vty.Image
@@ -302,15 +318,29 @@ prettyArray i rs vs =
       (Focused, _) -> Vty.text' (Vty.withStyle Vty.defAttr Vty.reverseVideo) t <|> colorFix
       (NotFocused, _) -> Vty.text' Vty.defAttr t <|> colorFix
 
-prettyObj :: Int -> RenderState -> HashMap Text Vty.Image -> Vty.Image
-prettyObj i rs vs =
-  let inner :: [Image] = indented 2 (HM.foldrWithKey' (\k v a -> [Vty.string (Vty.withForeColor defAttr Vty.cyan) (show k) <|> Vty.text' defAttr ": ", v] ++ a) [] vs)
+prettyObj :: Int -> Maybe (Buffer, Text) -> RenderState -> HashMap Text Vty.Image -> Vty.Image
+prettyObj i focusedKey rs@(foc, _mode) vs =
+  let inner :: [Image] =
+        indented
+          2
+          ( HM.foldrWithKey'
+              ( \k v a ->
+                  [imgForKey k <|> Vty.text' defAttr ": ", v] ++ a
+              )
+              []
+              vs
+          )
    in Vty.vertCat . indented i $
         ([img "{"] ++ inner ++ [img "},"])
   where
-    img t = case rs of
-      (Focused, _) -> Vty.text' (Vty.withStyle Vty.defAttr Vty.reverseVideo) t <|> colorFix
-      (NotFocused, _) -> Vty.text' Vty.defAttr t <|> colorFix
+    imgForKey k
+      | Just (buf, fk) <- focusedKey, fk == k && foc == Focused =
+         renderBuffer rs (defAttr `withForeColor` cyan `withStyle` reverseVideo) buf
+      | otherwise = Vty.string (defAttr `withForeColor` cyan) (show k)
+    img t = case foc of
+      Focused
+        | Nothing <- focusedKey -> Vty.text' (Vty.withStyle Vty.defAttr Vty.reverseVideo) t <|> colorFix
+      _ -> Vty.text' Vty.defAttr t <|> colorFix
 
 colorFix :: Vty.Image
 colorFix = Vty.text' defAttr ""
@@ -339,9 +369,8 @@ toCofree t = go t
     go x =
       let rec = fmap toCofree (FF.project x)
           buf = bufferFromValueF $ FF.project x
-          img = renderSubtree (NotFocused, Move) (FS mempty buf NoneState :< rec)
-          fs = FS img buf NoneState
+          img = renderSubtree (NotFocused, Move) (FS mempty buf Nothing :< rec)
+          fs = FS img buf Nothing
        in fs :< rec
-
-bufferFromValueF :: ValueF x -> Buffer
-bufferFromValueF v = newBuffer $ v ^. valueFText
+    bufferFromValueF :: ValueF x -> Buffer
+    bufferFromValueF v = newBuffer $ v ^. valueFText
