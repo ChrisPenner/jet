@@ -12,6 +12,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE BangPatterns #-}
 
 module Lib (run) where
 
@@ -35,28 +36,31 @@ import qualified Data.List as List
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import Data.Text.Zipper as TZ
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
-import Graphics.Vty
+import Graphics.Vty.Input.Events
 import qualified Graphics.Vty as Vty
 import Text.Read (readMaybe)
 import qualified Zipper as Z
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
+import Prettyprinter as P
+import Prettyprinter.Render.Terminal as P
+import qualified System.Console.ANSI as ANSI
+
+type PrettyJSON = Doc AnsiStyle
 
 type Buffer = TZ.TextZipper Text
 
 data FocusState = FS
-  { _rendered :: Vty.Image,
+  { _rendered :: PrettyJSON,
     _buffer :: Buffer,
     _selectedKey :: Maybe Text
   }
 
 makeLenses ''FocusState
-
-focusState_ :: Lens' (Z.Zipper ValueF FocusState) FocusState
-focusState_ = Z.focus_
 
 -- Traversal into the buffer that also updates the rendered images on the focus.
 buffer_ :: RenderState -> Traversal' (Z.Zipper ValueF FocusState) (TZ.TextZipper Text)
@@ -86,12 +90,15 @@ run = do
 
 edit :: Value -> IO Value
 edit value = do
-  config <- liftIO $ standardIOConfig
-  vty <- liftIO $ mkVty config
+  config <- liftIO $ Vty.standardIOConfig
+  vty <- liftIO $ Vty.mkVty config
   let start = Z.zipper . toCofree $ value
   let loop mode prevZ z = do
-        liftIO $ update vty . Vty.picForImage $ renderValue' (Focused, mode) z
-        e <- liftIO $ nextEvent vty
+        let !screen = renderStrict $ layoutSmart defaultLayoutOptions (renderValue' (Focused, mode) z)
+        ANSI.clearScreen
+        ANSI.setCursorPosition 0 0
+        liftIO $ Text.putStr screen
+        e <- liftIO $ Vty.nextEvent vty
         let (mode', foc') = handleEvent mode prevZ z e & second (rerenderFocus (Focused, mode))
         if (maybeQuit e)
           then pure foc'
@@ -328,14 +335,14 @@ outOf z =
           _ -> error "expected object"
     _ -> Z.tug Z.up z
 
-renderValue' :: RenderState -> Z.Zipper ValueF FocusState -> Image
+renderValue' :: RenderState -> Z.Zipper ValueF FocusState -> PrettyJSON
 renderValue' (foc, mode) z =
   Z.foldSpine alg $ (_rendered <$> rerenderFocus (foc, mode) z)
   where
-    alg :: Image -> ValueF Image -> Image
+    alg :: PrettyJSON -> ValueF PrettyJSON -> PrettyJSON
     alg img = \case
-      ObjectF hm -> prettyObj 2 Nothing (NotFocused, mode) hm
-      ArrayF vec -> prettyArray 2 (NotFocused, mode) vec
+      ObjectF hm -> prettyObj Nothing (NotFocused, mode) hm
+      ArrayF vec -> prettyArray (NotFocused, mode) vec
       StringF {} -> img
       NumberF {} -> img
       BoolF {} -> img
@@ -349,79 +356,76 @@ type RenderState = (Focused, ZMode)
 data Focused = Focused | NotFocused
   deriving (Eq)
 
-renderSubtree :: RenderState -> Cofree ValueF FocusState -> Vty.Image
+renderSubtree :: RenderState -> Cofree ValueF FocusState -> PrettyJSON
 renderSubtree rs@(foc, _) z = case (z ^. Cofree._unwrap, z ^. Cofree._extract . selectedKey) of
-  (StringF _, _) -> indentLine i (colored green "\"" <|> bufImg green <|> colored green "\",")
-  (NullF, _) -> indentLine i (colored Vty.yellow "null,")
-  (NumberF _, _) -> indentLine i (bufImg blue <|> colored blue ",")
-  (BoolF b, _) -> indentLine i (colored magenta (boolText_ # b) <|> Vty.char defAttr ',')
-  (ArrayF xs, _) -> prettyArray i rs (renderChildren xs)
-  (ObjectF xs, _) -> prettyObj i ((z ^. Cofree._extract . buffer,) <$> focusedKey) rs (renderChildren xs)
+  (StringF _, _) -> indent i (colored' Green "\"" <> bufImg Green <> colored' Green "\",")
+  (NullF, _) -> indent i (colored' Yellow "null,")
+  (NumberF _, _) -> indent i (bufImg Blue <> colored' Blue ",")
+  (BoolF b, _) -> indent i (colored' Magenta (boolText_ # b) <> pretty ',')
+  (ArrayF xs, _) -> prettyArray rs (renderChildren xs)
+  (ObjectF xs, _) -> prettyObj ((z ^. Cofree._extract . buffer,) <$> focusedKey) rs (renderChildren xs)
   where
-    colored col txt =
-      Vty.text' (Vty.defAttr `Vty.withForeColor` col `Vty.withStyle` if foc == Focused then Vty.reverseVideo else Vty.defaultStyleMask) txt
-        <|> colorFix
+    colored' :: Color -> Text -> PrettyJSON
+    colored' col txt =
+      P.annotate (if foc == Focused then reverseCol col else colorDull col) (pretty txt)
     focusedKey :: Maybe Text
     focusedKey = z ^. Cofree._extract . selectedKey
-    bufImg :: Vty.Color -> Image
-    bufImg col = renderBuffer rs (Vty.defAttr `Vty.withForeColor` col) $ z ^. Cofree._extract . buffer
-    renderChildren :: (Functor g, Functor f) => f (Cofree g FocusState) -> f Vty.Image
+    bufImg :: Color -> PrettyJSON
+    bufImg col = renderBuffer rs col $ z ^. Cofree._extract . buffer
+    renderChildren :: (Functor g, Functor f) => f (Cofree g FocusState) -> f PrettyJSON
     renderChildren = fmap (_rendered . Comonad.extract)
     i = 2
 
-renderBuffer :: RenderState -> Attr -> Buffer -> Image
-renderBuffer (Focused, Move) attr buf = Vty.text' (Vty.withStyle attr Vty.reverseVideo) $ bufferText buf
-renderBuffer (NotFocused, _) attr buf = Vty.text' attr $ bufferText buf
-renderBuffer (Focused, _) attr buf =
+reverseCol :: Color -> AnsiStyle
+reverseCol = bgColor
+
+prettyWith :: Pretty a => ann -> a -> Doc ann
+prettyWith ann a = annotate ann $ pretty a
+
+colored :: Pretty a => Color -> a -> Doc AnsiStyle
+colored col a = annotate (colorDull col) $ pretty a
+
+renderBuffer :: RenderState -> Color -> Buffer -> PrettyJSON
+renderBuffer (Focused, Move) col buf = prettyWith (reverseCol col) $ bufferText buf
+renderBuffer (NotFocused, _) col buf = colored col $ bufferText buf
+renderBuffer (Focused, _) col buf =
   let (prefix, suffix) = Text.splitAt (snd $ TZ.cursorPosition buf) (bufferText buf)
       suffixImg = case Text.uncons suffix of
-        Nothing -> Vty.char (Vty.withStyle attr Vty.reverseVideo) ' '
-        Just (c, rest) -> Vty.char (Vty.withStyle attr Vty.reverseVideo) c <|> Vty.text' attr rest
-   in Vty.text' attr prefix <|> suffixImg <|> colorFix
+        Nothing -> prettyWith (reverseCol col) ' '
+        Just (c, rest) -> prettyWith (reverseCol col) c <> colored col rest
+   in colored col prefix <> suffixImg
 
-prettyArray :: Int -> RenderState -> Vector Image -> Vty.Image
-prettyArray i rs vs =
-  let inner :: [Image] = indented 2 (Vector.toList vs)
-   in Vty.vertCat . indented i $ [img "["] ++ inner ++ [img "],"]
+prettyArray :: RenderState -> Vector PrettyJSON -> PrettyJSON
+prettyArray rs vs =
+  let inner :: [PrettyJSON] = (Vector.toList vs)
+   in vsep $ [img "[", indent 2 (vsep inner), img "],"]
   where
+    img :: Text -> PrettyJSON
     img t = case rs of
-      (Focused, _) -> Vty.text' (Vty.withStyle Vty.defAttr Vty.reverseVideo) t <|> colorFix
-      (NotFocused, _) -> Vty.text' Vty.defAttr t <|> colorFix
+      (Focused, _) -> prettyWith (reverseCol Black) t
+      (NotFocused, _) -> pretty t
 
-prettyObj :: Int -> Maybe (Buffer, Text) -> RenderState -> HashMap Text Vty.Image -> Vty.Image
-prettyObj i focusedKey rs@(foc, _mode) vs =
-  let inner :: [Image] =
-        indented
-          2
-          ( HM.foldrWithKey'
-              ( \k v a ->
-                  [imgForKey k <|> Vty.text' defAttr ": ", v] ++ a
+prettyObj :: Maybe (Buffer, Text) -> RenderState -> HashMap Text PrettyJSON -> PrettyJSON
+prettyObj focusedKey rs@(foc, _mode) vs =
+  let inner :: PrettyJSON
+      inner = vsep
+          ( HM.toList vs <&>
+              ( \(k, v) ->
+                  vsep [imgForKey k <> pretty @Text ": ", indent 2 v]
               )
-              []
-              vs
           )
-   in Vty.vertCat . indented i $
-        ([img "{"] ++ inner ++ [img "},"])
+   in vsep [img "{", indent 2 inner, img "},"]
   where
-    color = defAttr `withForeColor` cyan
     imgForKey k
       | Just (buf, fk) <- focusedKey,
         fk == k && foc == Focused =
-        Vty.char color '"' <|> renderBuffer rs color buf <|> Vty.char color '"' <|> colorFix
-      | otherwise = Vty.string color (show k)
+        colored Cyan '"' <> renderBuffer rs Cyan buf <> colored Cyan '"'
+      | otherwise = colored Cyan (show k)
+    img :: Text -> PrettyJSON
     img t = case foc of
       Focused
-        | Nothing <- focusedKey -> Vty.text' (Vty.withStyle Vty.defAttr Vty.reverseVideo) t <|> colorFix
-      _ -> Vty.text' Vty.defAttr t <|> colorFix
-
-colorFix :: Vty.Image
-colorFix = Vty.text' defAttr ""
-
-indented :: Functor f => Int -> f Vty.Image -> f Vty.Image
-indented n xs = (indentLine n) <$> xs
-
-indentLine :: Int -> Vty.Image -> Vty.Image
-indentLine n x = (Vty.text' (Vty.withForeColor defAttr Vty.brightBlack) $ " " <> Text.replicate (n - 1) " ") <|> x
+        | Nothing <- focusedKey -> prettyWith (reverseCol White) t
+      _ -> pretty t
 
 data JIndex
   = Index Int

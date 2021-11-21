@@ -54,6 +54,7 @@ library
       aeson
     , aeson-extra
     , aeson-pretty
+    , ansi-terminal
     , base >=4.7 && <5
     , bytestring
     , comonad
@@ -62,6 +63,8 @@ library
     , hashable
     , lens
     , mtl
+    , prettyprinter
+    , prettyprinter-ansi-terminal
     , recursion-schemes
     , recursion-zipper
     , scientific
@@ -100,6 +103,7 @@ executable structural-json-exe
       aeson
     , aeson-extra
     , aeson-pretty
+    , ansi-terminal
     , base >=4.7 && <5
     , bytestring
     , comonad
@@ -108,6 +112,8 @@ executable structural-json-exe
     , hashable
     , lens
     , mtl
+    , prettyprinter
+    , prettyprinter-ansi-terminal
     , recursion-schemes
     , recursion-zipper
     , scientific
@@ -148,6 +154,7 @@ test-suite structural-json-test
       aeson
     , aeson-extra
     , aeson-pretty
+    , ansi-terminal
     , base >=4.7 && <5
     , bytestring
     , comonad
@@ -156,6 +163,8 @@ test-suite structural-json-test
     , hashable
     , lens
     , mtl
+    , prettyprinter
+    , prettyprinter-ansi-terminal
     , recursion-schemes
     , recursion-zipper
     , scientific

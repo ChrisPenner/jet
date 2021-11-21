@@ -39,6 +39,9 @@ dependencies:
 - text-zipper
 - scientific
 - hashable
+- prettyprinter-ansi-terminal
+- prettyprinter
+- ansi-terminal
 
 default-extensions:
 - FlexibleInstances
