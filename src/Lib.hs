@@ -63,7 +63,7 @@ run = do
     getArgs >>= \case
       -- [] -> Aeson.decode . BS.pack <$> getContents
       [f] -> Aeson.decodeFileStrict f
-      _ -> exitFailure
+      _ -> putStrLn "usage: structural-json FILE.json" *> exitFailure
   result <- edit $ fromJust $ json
   -- result <- edit $ fromJust $ Aeson.decode ("[\"hi\", {\"testing\":[1, 2, false, null], \"other\":true}, [4, 5, 6]]")
   BS.putStrLn $ encodePretty result
@@ -192,8 +192,11 @@ handleEvent mode prevZ z evt =
           KChar 'l' -> z & into mode
           KChar 'j' -> z & nextSibling mode
           KChar 'k' -> z & prevSibling mode
-          KChar 'i'
-            | Just editBuf <- bufferFrom z -> (Edit editBuf, z)
+          KChar 'i' -> case mode of
+            KeyMove k -> (KeyEdit k (newBuffer k), z)
+            Move
+              | Just editBuf <- bufferFrom z -> (Edit editBuf, z)
+            _ -> (mode, z)
           KChar 'b' -> (mode, z & setFocus (BoolF True))
           KChar 'o' -> (mode, z & setFocus (ObjectF mempty))
           KChar 'a' -> (mode, z & setFocus (ArrayF mempty))
