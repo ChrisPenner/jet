@@ -59,7 +59,8 @@ toLineStream doc =
   where
     popAnn _ = do
       _1 %= drop 1
-      pure mempty
+      -- Need to clear existing colors or they bleed to the right.
+      pure [ImgChunk (Vty.text' Vty.defAttr "")]
     pushAnn = \case
       Left Cursor -> do
         cursorLine <- use _2

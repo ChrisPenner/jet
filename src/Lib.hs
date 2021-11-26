@@ -51,6 +51,9 @@ import qualified Render
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.Hclip
+import System.IO (IOMode (ReadMode), openFile)
+import qualified System.IO as IO
+import qualified System.Posix as Posix
 import Text.Read (readMaybe)
 import qualified Zipper as Z
 
@@ -95,18 +98,33 @@ type FocusState = Focused
 
 run :: IO ()
 run = do
-  json <-
+  (json, inputFd) <-
     getArgs >>= \case
-      -- [] -> Aeson.decode . BS.pack <$> getContents
-      [f] -> Aeson.decodeFileStrict f
+      [] -> do
+        json <-
+          (Aeson.eitherDecode . BS.pack <$> getContents) >>= \case
+            Left err -> do
+              IO.hPutStrLn IO.stderr err
+              exitFailure
+            Right json -> pure json
+        tty <- openFile "/dev/tty" ReadMode >>= Posix.handleToFd
+        pure (json, Just tty)
+      [f] -> do
+        json <-
+          Aeson.eitherDecodeFileStrict f >>= \case
+            Left err -> do
+              IO.hPutStrLn IO.stderr err
+              exitFailure
+            Right json -> pure json
+        pure (json, Nothing)
       _ -> putStrLn "usage: structural-json FILE.json" *> exitFailure
-  result <- edit $ fromJust $ json
+  result <- edit inputFd $ json
   BS.putStrLn $ encodePretty result
 
-edit :: Value -> IO Value
-edit value = do
+edit :: Maybe Posix.Fd -> Value -> IO Value
+edit input value = do
   config <- liftIO $ Vty.standardIOConfig
-  vty <- liftIO $ Vty.mkVty config
+  vty <- liftIO $ Vty.mkVty config {Vty.inputFd = input}
   let start = Z.zipper . toCofree $ value
   v <- flip evalStateT startState . runEditor $ loop vty start
   liftIO $ Vty.shutdown vty
@@ -134,9 +152,9 @@ pushUndo z =
     undos@(head' : _) | head' == z -> undos
     undos -> z : undos
 
-log :: Show a => a -> Editor ()
-log a = do
-  liftIO $ appendFile "log.txt" (show a <> "\n")
+-- log :: Show a => a -> Editor ()
+-- log a = do
+--   liftIO $ appendFile "log.txt" (show a <> "\n")
 
 startState :: ZState
 startState =
@@ -460,11 +478,17 @@ into z = do
 outOf :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
 outOf z = do
   mode <- use mode_
+  maybeParentKey <- case (Z.currentIndex z) of
+    Just (Key k) -> pure $ Just k
+    _ -> pure Nothing
+
   case (Z.branches z, mode) of
     (ObjectF _, KeyMove {}) -> do
       mode_ .= Move
       pure z
-    _ -> pure (Z.tug Z.up z)
+    _ -> do
+      maybe (pure ()) (\k -> mode_ .= KeyMove k) maybeParentKey
+      pure (Z.tug Z.up z)
 
 -- Render the given zipper
 fullRender :: ZMode -> Z.Zipper ValueF FocusState -> PrettyJSON

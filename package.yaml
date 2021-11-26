@@ -45,6 +45,7 @@ dependencies:
 - prettyprinter
 - ansi-terminal
 - Hclip
+- unix
 
 default-extensions:
 - FlexibleInstances

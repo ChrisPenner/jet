@@ -72,6 +72,7 @@ library
     , text
     , text-zipper
     , transformers
+    , unix
     , unordered-containers
     , vector
     , vty
@@ -124,6 +125,7 @@ executable structural-json-exe
     , text
     , text-zipper
     , transformers
+    , unix
     , unordered-containers
     , vector
     , vty
@@ -177,6 +179,7 @@ test-suite structural-json-test
     , text
     , text-zipper
     , transformers
+    , unix
     , unordered-containers
     , vector
     , vty
