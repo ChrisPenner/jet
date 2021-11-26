@@ -26,6 +26,7 @@ source-repository head
 library
   exposed-modules:
       Lib
+      Render
       TaggedCofree
   other-modules:
       Paths_structural_json
@@ -50,7 +51,8 @@ library
       MultiParamTypeClasses
   ghc-options: -Wall
   build-depends:
-      aeson
+      Hclip
+    , aeson
     , aeson-extra
     , aeson-pretty
     , ansi-terminal
@@ -100,7 +102,8 @@ executable structural-json-exe
       MultiParamTypeClasses
   ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      aeson
+      Hclip
+    , aeson
     , aeson-extra
     , aeson-pretty
     , ansi-terminal
@@ -152,7 +155,8 @@ test-suite structural-json-test
       MultiParamTypeClasses
   ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      aeson
+      Hclip
+    , aeson
     , aeson-extra
     , aeson-pretty
     , ansi-terminal

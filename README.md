@@ -7,9 +7,10 @@ https://user-images.githubusercontent.com/6439644/142779507-8b32ac10-e268-4f67-a
 
 - [ ] Proper scrolling support
 - [x] Insert/remove keys & list values
-- [ ] Ability to copy/paste values
+- [x] Ability to copy/paste values
 - [x] Shuffle list values around each other.
-- [ ] Better undo/redo system.
+- [x] Undo system.
+- [ ] Redo system.
 - [ ] display Keymap/help
 - [ ] Accept input from stdin
 - [ ] Revive render caching 

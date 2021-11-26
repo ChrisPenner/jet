@@ -21,6 +21,7 @@ module Lib (run) where
 
 import Control.Comonad.Cofree
 import qualified Control.Comonad.Cofree as Cofree
+import qualified Control.Comonad.Trans.Cofree as CofreeF
 import Control.Lens hiding ((:<))
 import Control.Monad.State
 import Control.Monad.Trans.Maybe (MaybeT (MaybeT, runMaybeT))
@@ -29,6 +30,7 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.Aeson.Extra
 import qualified Data.ByteString.Lazy.Char8 as BS
+import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Functor.Classes (Eq1 (..), Ord1 (liftCompare))
 import qualified Data.Functor.Foldable as FF
 import Data.HashMap.Strict (HashMap)
@@ -50,6 +52,7 @@ import Prettyprinter.Render.Terminal as P
 import qualified System.Console.ANSI as ANSI
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
+import System.Hclip
 import Text.Read (readMaybe)
 import qualified Zipper as Z
 
@@ -59,7 +62,7 @@ hoistMaybe = MaybeT . pure
 data ZState = ZState
   { _undo :: [Z.Zipper ValueF FocusState],
     _mode :: ZMode,
-    _register :: ValueF (Z.Zipper ValueF FocusState)
+    _register :: ValueF (Cofree ValueF FocusState)
   }
 
 newtype Editor a = Editor {runEditor :: StateT ZState IO a}
@@ -68,7 +71,7 @@ newtype Editor a = Editor {runEditor :: StateT ZState IO a}
 mode_ :: Lens' ZState ZMode
 mode_ = lens _mode (\s m -> s {_mode = m})
 
-register_ :: Lens' ZState (ValueF (Z.Zipper ValueF FocusState))
+register_ :: Lens' ZState (ValueF (Cofree ValueF FocusState))
 register_ = lens _register (\s m -> s {_register = m})
 
 undo_ :: Lens' ZState [Z.Zipper ValueF FocusState]
@@ -100,7 +103,6 @@ run = do
       [f] -> Aeson.decodeFileStrict f
       _ -> putStrLn "usage: structural-json FILE.json" *> exitFailure
   result <- edit $ fromJust $ json
-  -- result <- edit $ fromJust $ Aeson.decode ("[\"hi\", {\"testing\":[1, 2, false, null], \"other\":true}, [4, 5, 6]]")
   BS.putStrLn $ encodePretty result
 
 edit :: Value -> IO Value
@@ -118,16 +120,21 @@ loop ::
   Editor (Z.Zipper ValueF FocusState)
 loop vty z = do
   rendered <- uses mode_ (\m -> fullRender m z)
-  let !screen = renderStrict $ layoutSmart defaultLayoutOptions rendered
-  liftIO $ ANSI.clearScreen
-  liftIO $ ANSI.setCursorPosition 0 0
-  liftIO $ Text.putStr screen
+  let screen = renderStrict $ layoutSmart defaultLayoutOptions rendered
+  renderScreen screen
   e <- liftIO $ Vty.nextEvent vty
   nextZ <- handleEvent z e
-  logMode
   if (maybeQuit e)
     then pure nextZ
     else (loop vty nextZ)
+
+-- Force the screen to whnf before we clear the old screen.
+-- Otherwise it does too much work after clearing but before rendering.
+renderScreen :: Text -> Editor ()
+renderScreen !screen = do
+  liftIO $ ANSI.clearScreen
+  liftIO $ ANSI.setCursorPosition 0 0
+  liftIO $ Text.putStr screen
 
 pushUndo :: Z.Zipper ValueF FocusState -> Editor ()
 pushUndo z =
@@ -135,10 +142,10 @@ pushUndo z =
     undos@(head' : _) | head' == z -> undos
     undos -> z : undos
 
-logMode :: Editor ()
-logMode = do
-  mode <- use mode_
-  liftIO $ appendFile "log.txt" (show mode <> "\n")
+-- logMode :: Editor ()
+-- logMode = do
+--   mode <- use mode_
+--   liftIO $ appendFile "log.txt" (show mode <> "\n")
 
 startState :: ZState
 startState =
@@ -306,6 +313,14 @@ handleEvent z evt = do
           KChar ' ' -> do
             pushUndo z
             pure (z & tryToggle)
+          KChar 'y' -> do
+            let curVal = Z.branches z
+            register_ .= curVal
+            liftIO $ setClipboard (encodeValueFCofree curVal)
+            pure z
+          KChar 'p' -> do
+            reg <- use register_
+            pure (z & setFocus reg)
           KEnter -> do
             pushUndo z
             tryInsert z
@@ -314,6 +329,12 @@ handleEvent z evt = do
             delete z
           _ -> pure z
         _ -> pure z
+
+encodeValueFCofree :: ValueF (Cofree ValueF FocusState) -> String
+encodeValueFCofree vf = LBS.unpack . encodePretty . FF.embed $ fmap (FF.cata alg) vf
+  where
+    alg :: CofreeF.CofreeF ValueF Focused Value -> Value
+    alg (_ CofreeF.:< vf') = FF.embed vf'
 
 setFocus :: ValueF (Cofree ValueF FocusState) -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 setFocus f z = z & Z.branches_ .~ f
