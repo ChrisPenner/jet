@@ -13,6 +13,7 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -Wno-orphans #-}
 
 module Lib (run) where
 
@@ -205,7 +206,8 @@ handleEvent mode prevZ z evt =
           KChar 't' -> (mode, z & setFocus (StringF ""))
           KChar 'u' -> (mode, prevZ)
           KChar ' ' -> (mode, z & tryToggle)
-          KChar '\n' -> tryInsert z
+          KEnter -> tryInsert z
+          KBS -> delete mode z
           _ -> (mode, z)
         _ -> (mode, z)
 
@@ -225,12 +227,20 @@ tryInsert =
     ArrayF arr -> (Move, ArrayF $ arr <> pure (NotFocused :< NullF))
     x -> (Move, x)
 
+delete :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
+delete mode =
+  Z.branches_ %%~ \case
+    ObjectF hm
+      | KeyMove k <- mode -> (Move, ObjectF (HM.delete k hm))
+    ArrayF arr -> (Move, ArrayF $ arr <> pure (NotFocused :< NullF))
+    _ -> (Move, NullF)
+
 nextSibling :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
 nextSibling mode z = fromMaybe (mode, z) $ do
   case (mode, Z.branches z) of
     (KeyMove k, ObjectF hm) -> do
-      prevKey <- findAfter (== k) $ HashMap.keys hm
-      pure $ (KeyMove prevKey, z)
+      nextKey <- findAfter (== k) $ HashMap.keys hm
+      pure $ (KeyMove nextKey, z)
     _ -> do
       parent <- Z.up z
       curI <- Z.currentIndex z
@@ -273,8 +283,8 @@ prevSibling mode z = fromMaybe (mode, z) $ do
               let keys = HM.keys hm
               newKey <- findBefore (\k -> Key k == curI) keys
               pure $ Key newKey
-            ArrayF xs -> case curI of
-              (Index i) | i < (length xs - 1) -> pure . Index $ i + 1
+            ArrayF _ -> case curI of
+              (Index i) | i > 0 -> pure . Index $ i - 1
               _ -> Nothing
             StringF {} -> Nothing
             NumberF {} -> Nothing
@@ -426,6 +436,19 @@ data JIndex
   = Index Int
   | Key Text
   deriving (Show, Eq, Ord)
+
+instance FunctorWithIndex JIndex ValueF
+
+instance FoldableWithIndex JIndex ValueF
+
+instance TraversableWithIndex JIndex ValueF where
+  itraverse f = \case
+    NullF -> pure NullF
+    StringF txt -> pure (StringF txt)
+    NumberF sci -> pure (NumberF sci)
+    BoolF b -> pure (BoolF b)
+    ObjectF hm -> ObjectF <$> itraverse (\k a -> f (Key k) a) hm
+    ArrayF arr -> ArrayF <$> itraverse (\k a -> f (Index k) a) arr
 
 instance Z.Idx ValueF where
   type IxOf ValueF = JIndex
