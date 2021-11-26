@@ -211,7 +211,7 @@ startState vty =
       _mode = Move,
       _register = NullF,
       _vty = vty,
-      _flash = ""
+      _flash = "Hello World"
     }
 
 maybeQuit :: Vty.Event -> Bool
@@ -374,6 +374,7 @@ handleEvent evt zipper = do
             flash_ .= "Copied"
             copy z
           KChar 'p' -> do
+            flash_ .= "Paste"
             pushUndo z
             paste z
           KChar 'x' -> do
