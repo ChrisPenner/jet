@@ -195,6 +195,8 @@ handleEvent mode prevZ z evt =
           KChar 'h' -> z & outOf mode
           KChar 'l' -> z & into mode
           KChar 'j' -> z & nextSibling mode
+          KChar 'J' -> (Move, z & moveElement Forward)
+          KChar 'K' -> (Move, z & moveElement Backward)
           KChar 'k' -> z & prevSibling mode
           KChar 'i' -> case mode of
             KeyMove k -> (KeyEdit k (newBuffer k), z)
@@ -216,6 +218,31 @@ handleEvent mode prevZ z evt =
 
 setFocus :: ValueF (Cofree ValueF FocusState) -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 setFocus f z = z & Z.branches_ .~ f
+
+data Dir = Forward | Backward
+
+moveElement :: Dir -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
+moveElement dir z = fromMaybe z $ do
+  i <- case Z.currentIndex z of
+    Just (Index i) -> pure i
+    _ -> Nothing
+  parent <- Z.up z
+  pure $
+    case parent ^. Z.branches_ of
+      ArrayF arr ->
+        let swapI = case dir of
+              Forward -> i + 1
+              Backward -> i - 1
+            moves =
+              [ (i, arr Vector.!? swapI),
+                (swapI, arr Vector.!? i)
+              ]
+                & sequenceOf (traversed . _2)
+                & fromMaybe []
+         in parent
+              & Z.branches_ .~ ArrayF (arr Vector.// moves)
+              & fromMaybe z . Z.down (Index swapI)
+      _ -> z
 
 tryToggle :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 tryToggle z =
