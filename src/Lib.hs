@@ -231,12 +231,24 @@ tryInsert =
     x -> (Move, x)
 
 delete :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
-delete mode =
-  Z.branches_ %%~ \case
-    ObjectF hm
-      | KeyMove k <- mode -> (Move, ObjectF (HM.delete k hm))
-    ArrayF arr -> (Move, ArrayF $ arr <> pure (NotFocused :< NullF))
-    _ -> (Move, NullF)
+delete mode z =
+  let z' =
+        case z ^. Z.branches_ of
+          -- If we're in a Key focus, delete that key
+          ObjectF hm
+            | KeyMove k <- mode -> (z & Z.branches_ .~ ObjectF (HM.delete k hm))
+          -- Otherwise move up a layer and delete the key we were in.
+          _ -> case Z.currentIndex z of
+            -- If we don't have a parent, set the current node to null
+            Nothing -> z & Z.branches_ .~ NullF
+            Just i -> fromMaybe z $ do
+              parent <- Z.up z
+              pure $
+                parent & Z.branches_ %~ \case
+                  ObjectF hm | Key k <- i -> ObjectF (HM.delete k hm)
+                  ArrayF arr | Index j <- i -> ArrayF (Vector.ifilter (\i' _ -> i' /= j) arr)
+                  x -> x
+   in (Move, z')
 
 nextSibling :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
 nextSibling mode z = fromMaybe (mode, z) $ do
