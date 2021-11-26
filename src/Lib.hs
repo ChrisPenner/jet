@@ -1,5 +1,6 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE InstanceSigs #-}
@@ -28,6 +29,7 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
 import Data.Aeson.Extra
 import qualified Data.ByteString.Lazy.Char8 as BS
+import Data.Functor.Classes (Eq1 (..), Ord1 (liftCompare))
 import qualified Data.Functor.Foldable as FF
 import Data.HashMap.Strict (HashMap)
 import qualified Data.HashMap.Strict as HM
@@ -68,6 +70,9 @@ mode_ = lens _mode (\s m -> s {_mode = m})
 
 register_ :: Lens' ZState (ValueF (Z.Zipper ValueF FocusState))
 register_ = lens _register (\s m -> s {_register = m})
+
+undo_ :: Lens' ZState [Z.Zipper ValueF FocusState]
+undo_ = lens _undo (\s m -> s {_undo = m})
 
 recover :: a -> MaybeT Editor a -> Editor a
 recover def m = do
@@ -123,6 +128,12 @@ loop vty z = do
   if (maybeQuit e)
     then pure nextZ
     else (loop vty nextZ)
+
+pushUndo :: Z.Zipper ValueF FocusState -> Editor ()
+pushUndo z =
+  undo_ %= \case
+    undos@(head' : _) | head' == z -> undos
+    undos -> z : undos
 
 logMode :: Editor ()
 logMode = do
@@ -242,7 +253,7 @@ handleEvent z evt = do
             KBS -> do
               mode_ . buf_ %= TZ.deletePrevChar
               pure z
-            KEsc ->
+            KEsc -> do
               applyBuf z
             _ -> pure z
         _ -> pure z
@@ -253,11 +264,14 @@ handleEvent z evt = do
           KChar 'l' -> z & into
           KChar 'j' -> z & sibling Forward
           KChar 'J' -> do
+            pushUndo z
             pure (z & moveElement Forward)
-          KChar 'K' ->
+          KChar 'K' -> do
+            pushUndo z
             pure (z & moveElement Backward)
           KChar 'k' -> z & sibling Backward
-          KChar 'i' ->
+          KChar 'i' -> do
+            pushUndo z
             use mode_ >>= \case
               KeyMove k -> do
                 mode_ .= KeyEdit k (newBuffer k)
@@ -267,16 +281,37 @@ handleEvent z evt = do
                   mode_ .= Edit editBuf
                   pure z
               _ -> pure z
-          KChar 'b' -> pure (z & setFocus (BoolF True))
-          KChar 'o' -> pure (z & setFocus (ObjectF mempty))
-          KChar 'a' -> pure (z & setFocus (ArrayF mempty))
-          KChar 'n' -> pure (z & setFocus (NumberF 0))
-          KChar 's' -> pure (z & setFocus (StringF ""))
-          KChar 't' -> pure (z & setFocus (StringF ""))
-          -- KChar 'u' -> pure (prevZ)
-          KChar ' ' -> pure (z & tryToggle)
-          KEnter -> tryInsert z
-          KBS -> delete z
+          KChar 'b' -> do
+            pushUndo z
+            pure (z & setFocus (BoolF True))
+          KChar 'o' -> do
+            pushUndo z
+            pure (z & setFocus (ObjectF mempty))
+          KChar 'a' -> do
+            pushUndo z
+            pure (z & setFocus (ArrayF mempty))
+          KChar 'n' -> do
+            pushUndo z
+            pure (z & setFocus (NumberF 0))
+          KChar 's' -> do
+            pushUndo z
+            pure (z & setFocus (StringF ""))
+          KChar 'u' -> do
+            -- TODO: replace undo state with a zipper to add redo
+            use undo_ >>= \case
+              (lastZ : rest) -> do
+                undo_ .= rest
+                pure lastZ
+              _ -> pure z
+          KChar ' ' -> do
+            pushUndo z
+            pure (z & tryToggle)
+          KEnter -> do
+            pushUndo z
+            tryInsert z
+          KBS -> do
+            pushUndo z
+            delete z
           _ -> pure z
         _ -> pure z
 
@@ -535,6 +570,35 @@ prettyObj focused mode vs =
     img t = case (focused, mode) of
       (Focused, Move) -> prettyWith (reverseCol White) t
       _ -> pretty t
+
+instance Eq1 ValueF where
+  liftEq f vf1 vf2 = case (vf1, vf2) of
+    (ObjectF l, ObjectF r) -> liftEq f l r
+    (ArrayF l, ArrayF r) -> liftEq f l r
+    (NullF, NullF) -> True
+    (StringF l, StringF r) -> l == r
+    (NumberF l, NumberF r) -> l == r
+    (BoolF l, BoolF r) -> l == r
+    _ -> False
+
+instance Ord1 ValueF where
+  liftCompare f vf1 vf2 = case (vf1, vf2) of
+    (ObjectF l, ObjectF r) -> liftCompare f l r
+    (ArrayF l, ArrayF r) -> liftCompare f l r
+    (NullF, NullF) -> EQ
+    (StringF l, StringF r) -> compare l r
+    (NumberF l, NumberF r) -> compare l r
+    (BoolF l, BoolF r) -> compare l r
+    (NullF, _) -> LT
+    (_, NullF) -> GT
+    (BoolF _, _) -> LT
+    (_, BoolF _) -> GT
+    (NumberF _, _) -> LT
+    (_, NumberF _) -> GT
+    (StringF _, _) -> LT
+    (_, StringF _) -> GT
+    (ArrayF _, _) -> LT
+    (_, ArrayF _) -> GT
 
 data JIndex
   = Index Int
