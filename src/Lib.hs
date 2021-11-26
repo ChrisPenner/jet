@@ -41,7 +41,6 @@ import qualified Data.List as List
 import Data.Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.IO as Text
 import Data.Text.Zipper as TZ
 import Data.Vector (Vector)
 import qualified Data.Vector as Vector
@@ -49,7 +48,6 @@ import qualified Graphics.Vty as Vty
 import Graphics.Vty.Input.Events
 import Prettyprinter as P
 import qualified Render
-import qualified System.Console.ANSI as ANSI
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.Hclip
@@ -130,24 +128,15 @@ loop vty z = do
     else (loop vty nextZ)
   where
 
--- Force the screen to whnf before we clear the old screen.
--- Otherwise it does too much work after clearing but before rendering.
-renderScreen :: Text -> Editor ()
-renderScreen !screen = do
-  liftIO $ ANSI.clearScreen
-  liftIO $ ANSI.setCursorPosition 0 0
-  liftIO $ Text.putStr screen
-
 pushUndo :: Z.Zipper ValueF FocusState -> Editor ()
 pushUndo z =
   undo_ %= \case
     undos@(head' : _) | head' == z -> undos
     undos -> z : undos
 
--- logMode :: Editor ()
--- logMode = do
---   mode <- use mode_
---   liftIO $ appendFile "log.txt" (show mode <> "\n")
+log :: Show a => a -> Editor ()
+log a = do
+  liftIO $ appendFile "log.txt" (show a <> "\n")
 
 startState :: ZState
 startState =
@@ -432,10 +421,6 @@ sibling dir z = recover z $ do
         Just i -> hoistMaybe $ Z.down i parent
         Nothing -> hoistMaybe Nothing
   where
-    -- nextZ <- lift $ sibling dir parent
-    -- fstI <- hoistMaybe $ getFirstIdx (Z.branches nextZ)
-    -- hoistMaybe $ Z.down fstI nextZ
-
     (findSiblingIndex, alterIndex) = case dir of
       Forward ->
         ( findAfter,
@@ -451,26 +436,6 @@ findAfter p xs = fmap snd . List.find (p . fst) $ zip xs (drop 1 xs)
 
 findBefore :: (a -> Bool) -> [a] -> Maybe a
 findBefore p xs = fmap snd . List.find (p . fst) $ zip (drop 1 xs) xs
-
--- getFirstIdx :: ValueF x -> Maybe JIndex
--- getFirstIdx = \case
---   ObjectF hm -> Key . fst <$> uncons (HM.keys hm)
---   ArrayF Empty -> Nothing
---   ArrayF {} -> Just $ Index 0
---   StringF {} -> Nothing
---   NumberF {} -> Nothing
---   BoolF {} -> Nothing
---   NullF -> Nothing
-
--- getLastIdx :: ValueF x -> Maybe JIndex
--- getLastIdx = \case
---   ObjectF hm -> Key . snd <$> unsnoc (HM.keys hm)
---   ArrayF Empty -> Nothing
---   ArrayF vec -> Just $ Index (length vec - 1)
---   StringF {} -> Nothing
---   NumberF {} -> Nothing
---   BoolF {} -> Nothing
---   NullF -> Nothing
 
 newBuffer :: Text -> Buffer
 newBuffer txt = TZ.gotoEOF $ TZ.textZipper (Text.lines txt) Nothing
@@ -507,19 +472,6 @@ fullRender mode z = do
   Z.fold alg $ (z & Z.focus_ .~ Focused)
   where
     alg foc vf = renderSubtree foc mode vf
-
--- where
---   alg :: PrettyJSON -> ValueF PrettyJSON -> PrettyJSON
---   alg img = \case
---     ObjectF hm -> prettyObj NotFocused mode hm
---     ArrayF vec -> prettyArray NotFocused vec
---     StringF {} -> img
---     NumberF {} -> img
---     BoolF {} -> img
---     NullF -> img
-
--- rerenderFocus :: ZMode -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
--- rerenderFocus mode z = z & Z.focus_ . rendered .~ renderSubtree Focused mode (z ^. Z.unwrapped_)
 
 -- | Renders a subtree
 renderSubtree :: Focused -> ZMode -> ValueF PrettyJSON -> PrettyJSON
@@ -654,17 +606,6 @@ instance Z.Idx ValueF where
 
 toCofree :: (Value -> Cofree ValueF FocusState)
 toCofree t = Cofree.unfold (\b -> (NotFocused, FF.project b)) t
-
--- where
---   go x =
---     let rec = fmap toCofree (FF.project x)
---         buf = bufferFromValueF $ FF.project x
---         img = renderSubtree NotFocused Move rec
---         fs = FS img buf Nothing
---      in fs :< rec
-
--- bufferFromValueF :: ValueF x -> Buffer
--- bufferFromValueF v = newBuffer $ v ^. valueFText
 
 bufferFrom :: Z.Zipper ValueF a -> Maybe Buffer
 bufferFrom z = newBuffer <$> (Z.branches z ^? valueFText)
