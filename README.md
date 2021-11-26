@@ -13,7 +13,7 @@ A structural editor for JSON.
 I.e. an editor which is aware of the *structure* of JSON and allows you to manipulate it directly.
 The document is _always_ in a valid state.
 
-https://user-images.githubusercontent.com/6439644/142779507-8b32ac10-e268-4f67-a0b9-39808ded09d6.mov
+https://user-images.githubusercontent.com/6439644/143650775-6478eb4d-e67f-42e7-aae9-53ef8e0173b1.mov
 
 
 # Features
