@@ -10,7 +10,7 @@ https://user-images.githubusercontent.com/6439644/142779507-8b32ac10-e268-4f67-a
 - [x] ~Ability to copy/paste values~
 - [x] ~Shuffle list values around each other.~
 - [x] ~Undo system.~
-- [ ] folding
+- [x] folding
 - [ ] Redo system.
 - [x] ~display Keymap/help~
 - [x] ~Accept input from stdin~
@@ -19,3 +19,4 @@ https://user-images.githubusercontent.com/6439644/142779507-8b32ac10-e268-4f67-a
 - [ ] Improve Performance on big files
 - [ ] Allow cut/paste of object keys.
 - [ ] Allow inserting when empty key already exists
+- [ ] Search!

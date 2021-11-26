@@ -67,7 +67,8 @@ data ZState = ZState
   { _undo :: [Z.Zipper ValueF FocusState],
     _mode :: ZMode,
     _register :: ValueF (Cofree ValueF FocusState),
-    _vty :: Vty.Vty
+    _vty :: Vty.Vty,
+    _flash :: Text
   }
 
 newtype Editor a = Editor {runEditor :: StateT ZState IO a}
@@ -84,6 +85,9 @@ undo_ = lens _undo (\s m -> s {_undo = m})
 
 vty_ :: Lens' ZState Vty.Vty
 vty_ = lens _vty (\s m -> s {_vty = m})
+
+flash_ :: Lens' ZState Text
+flash_ = lens _flash (\s m -> s {_flash = m})
 
 recover :: a -> MaybeT Editor a -> Editor a
 recover def m = do
@@ -150,32 +154,45 @@ edit input value = do
   config <- liftIO $ Vty.standardIOConfig
   vty <- liftIO $ Vty.mkVty config {Vty.inputFd = input}
   let start = Z.zipper . toCofree $ value
-  v <- flip evalStateT (startState vty) . runEditor $ loop vty start
+  v <- flip evalStateT (startState vty) . runEditor $ loop start
   liftIO $ Vty.shutdown vty
   pure (Z.flatten v)
 
 loop ::
-  Vty.Vty ->
   Z.Zipper ValueF FocusState ->
   Editor (Z.Zipper ValueF FocusState)
-loop vty z = do
-  (winWidth, winHeight) <- liftIO . Vty.displayBounds . Vty.outputIface $ vty
+loop z = do
+  (winWidth, winHeight) <- bounds
+  vty <- use vty_
   rendered <- uses mode_ (\m -> fullRender m z)
-  let screen = Vty.vertCat . Render.renderScreen (winHeight - Vty.imageHeight (footerImg winWidth)) . layoutSmart defaultLayoutOptions $ rendered
-  let spacerHeight = winHeight - (Vty.imageHeight screen + Vty.imageHeight (footerImg winWidth))
+  footer <- footerImg
+  let screen = Vty.vertCat . Render.renderScreen (winHeight - Vty.imageHeight footer) . layoutSmart defaultLayoutOptions $ rendered
+  let spacerHeight = winHeight - (Vty.imageHeight screen + Vty.imageHeight footer)
   let spacers = Vty.charFill Vty.defAttr ' ' winWidth spacerHeight
-  liftIO $ Vty.update vty (Vty.picForImage (screen Vty.<-> spacers Vty.<-> (footerImg winWidth)))
+  liftIO $ Vty.update vty (Vty.picForImage (screen Vty.<-> spacers Vty.<-> footer))
+  flash_ .= ""
   e <- liftIO $ Vty.nextEvent vty
   nextZ <- handleEvent e z
   if (maybeQuit e)
     then pure nextZ
-    else (loop vty nextZ)
+    else (loop nextZ)
 
-footerImg :: Int -> Vty.Image
-footerImg w =
+bounds :: Editor (Int, Int)
+bounds = use vty_ >>= liftIO . Vty.displayBounds . Vty.outputIface
+
+footerImg :: Editor Vty.Image
+footerImg = do
+  (w, _) <- bounds
+  flash <- gets _flash
   let attr = (Vty.defAttr `Vty.withForeColor` Vty.green `Vty.withStyle` Vty.reverseVideo)
-      txt = Vty.text' attr "?: Help"
-   in txt Vty.<|> Vty.charFill attr ' ' (w - Vty.imageWidth txt) 1
+      helpMsg = Vty.text' attr "| Press '?' for help"
+      flashMsg = Vty.text' (attr `Vty.withStyle` Vty.bold) (" " <> flash)
+  pure $
+    Vty.horizCat
+      [ flashMsg,
+        Vty.charFill attr ' ' (w - (Vty.imageWidth helpMsg + Vty.imageWidth flashMsg)) 1,
+        helpMsg
+      ]
 
 pushUndo :: Z.Zipper ValueF FocusState -> Editor ()
 pushUndo z =
@@ -193,7 +210,8 @@ startState vty =
     { _undo = [],
       _mode = Move,
       _register = NullF,
-      _vty = vty
+      _vty = vty,
+      _flash = ""
     }
 
 maybeQuit :: Vty.Event -> Bool
@@ -343,6 +361,7 @@ handleEvent evt zipper = do
             pure (z & setFocus (StringF ""))
           KChar 'u' -> do
             -- TODO: replace undo state with a zipper to add redo
+            flash_ .= "Undo"
             use undo_ >>= \case
               (lastZ : rest) -> do
                 undo_ .= rest
@@ -736,7 +755,8 @@ helpImg =
           ("o", "replace element with object"),
           ("u", "undo last change"),
           ("y", "copy current value into buffer (and clipboard)"),
-          ("p", "paste value from buffer over current value")
+          ("p", "paste value from buffer over current value"),
+          ("x", "cut a value, equivalent to a copy -> delete")
         ]
    in Vty.vertCat
         ( keys <&> \(key, desc) ->
