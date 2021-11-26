@@ -205,6 +205,7 @@ handleEvent mode prevZ z evt =
           KChar 't' -> (mode, z & setFocus (StringF ""))
           KChar 'u' -> (mode, prevZ)
           KChar ' ' -> (mode, z & tryToggle)
+          KChar '\n' -> tryInsert z
           _ -> (mode, z)
         _ -> (mode, z)
 
@@ -216,6 +217,13 @@ tryToggle z =
   z & Z.branches_ %~ \case
     BoolF b -> BoolF (not b)
     x -> x
+
+tryInsert :: Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
+tryInsert =
+  Z.branches_ %%~ \case
+    ObjectF hm -> (KeyEdit "" $ newBuffer "", ObjectF $ HM.insert "" (NotFocused :< NullF) hm)
+    ArrayF arr -> (Move, ArrayF $ arr <> pure (NotFocused :< NullF))
+    x -> (Move, x)
 
 nextSibling :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
 nextSibling mode z = fromMaybe (mode, z) $ do
