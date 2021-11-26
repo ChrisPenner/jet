@@ -1,6 +1,7 @@
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
@@ -21,6 +22,7 @@ import Control.Comonad.Cofree
 import qualified Control.Comonad.Cofree as Cofree
 import Control.Lens hiding ((:<))
 import Control.Monad.State
+import Control.Monad.Trans.Maybe (MaybeT (MaybeT, runMaybeT))
 import Data.Aeson (Value)
 import qualified Data.Aeson as Aeson
 import Data.Aeson.Encode.Pretty (encodePretty)
@@ -49,6 +51,33 @@ import System.Exit (exitFailure)
 import Text.Read (readMaybe)
 import qualified Zipper as Z
 
+hoistMaybe :: Maybe a -> MaybeT Editor a
+hoistMaybe = MaybeT . pure
+
+data ZState = ZState
+  { _undo :: [Z.Zipper ValueF FocusState],
+    _mode :: ZMode,
+    _register :: ValueF (Z.Zipper ValueF FocusState)
+  }
+
+newtype Editor a = Editor {runEditor :: StateT ZState IO a}
+  deriving newtype (Functor, Applicative, Monad, MonadState ZState, MonadIO)
+
+mode_ :: Lens' ZState ZMode
+mode_ = lens _mode (\s m -> s {_mode = m})
+
+register_ :: Lens' ZState (ValueF (Z.Zipper ValueF FocusState))
+register_ = lens _register (\s m -> s {_register = m})
+
+recover :: a -> MaybeT Editor a -> Editor a
+recover def m = do
+  let e = runMaybeT m
+  s <- get
+  r <- liftIO $ flip runStateT s . runEditor $ e
+  case r of
+    (Just a, newS) -> put newS *> pure a
+    (Nothing, _) -> pure def
+
 data Focused = Focused | NotFocused
   deriving (Eq)
 
@@ -74,21 +103,39 @@ edit value = do
   config <- liftIO $ Vty.standardIOConfig
   vty <- liftIO $ Vty.mkVty config
   let start = Z.zipper . toCofree $ value
-  let loop mode prevZ z = do
-        let !screen = renderStrict $ layoutSmart defaultLayoutOptions (fullRender mode z)
-        ANSI.clearScreen
-        ANSI.setCursorPosition 0 0
-        liftIO $ Text.putStr screen
-        e <- liftIO $ Vty.nextEvent vty
-        let (nextMode, nextZ) = handleEvent mode prevZ z e
-        appendFile "log.txt" (show nextMode <> "\n")
-        -- let nextZ = rerenderFocus nextMode updatedZ
-        if (maybeQuit e)
-          then pure nextZ
-          else (loop nextMode z nextZ)
-  v <- loop Move start start
+  v <- flip evalStateT startState . runEditor $ loop vty start
   liftIO $ Vty.shutdown vty
   pure (Z.flatten v)
+
+loop ::
+  Vty.Vty ->
+  Z.Zipper ValueF FocusState ->
+  Editor (Z.Zipper ValueF FocusState)
+loop vty z = do
+  rendered <- uses mode_ (\m -> fullRender m z)
+  let !screen = renderStrict $ layoutSmart defaultLayoutOptions rendered
+  liftIO $ ANSI.clearScreen
+  liftIO $ ANSI.setCursorPosition 0 0
+  liftIO $ Text.putStr screen
+  e <- liftIO $ Vty.nextEvent vty
+  nextZ <- handleEvent z e
+  logMode
+  if (maybeQuit e)
+    then pure nextZ
+    else (loop vty nextZ)
+
+logMode :: Editor ()
+logMode = do
+  mode <- use mode_
+  liftIO $ appendFile "log.txt" (show mode <> "\n")
+
+startState :: ZState
+startState =
+  ZState
+    { _undo = [],
+      _mode = Move,
+      _register = NullF
+    }
 
 maybeQuit :: Vty.Event -> Bool
 maybeQuit = \case
@@ -99,30 +146,31 @@ maybeQuit = \case
 bufferText :: Buffer -> Text
 bufferText = Text.concat . TZ.getText
 
-applyBuf :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
-applyBuf mode z =
-  case mode of
-    Edit buf ->
+applyBuf :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
+applyBuf z = do
+  use mode_ >>= \case
+    Edit buf -> do
       let txt = buf ^. to bufferText
-       in ( Move,
-            z & Z.unwrapped_ . _unwrap
-              %~ ( \case
-                     StringF _ -> StringF txt
-                     (NumberF n) -> NumberF . fromMaybe n . readMaybe $ Text.unpack txt
-                     x -> x
-                 )
-          )
+      mode_ .= Move
+      pure
+        ( z & Z.unwrapped_ . _unwrap
+            %~ ( \case
+                   StringF _ -> StringF txt
+                   (NumberF n) -> NumberF . fromMaybe n . readMaybe $ Text.unpack txt
+                   x -> x
+               )
+        )
     KeyEdit key buf -> do
       let txt = buf ^. to bufferText
-       in ( KeyMove txt,
-            z & Z.unwrapped_ . _unwrap
-              %~ ( \case
-                     (ObjectF hm) -> ObjectF $ renameKey key txt hm
-                     x -> x
-                 )
-          )
-    Move -> (Move, z)
-    KeyMove k -> (KeyMove k, z)
+      mode_ .= (KeyMove txt)
+      pure
+        ( z & Z.unwrapped_ . _unwrap
+            %~ ( \case
+                   (ObjectF hm) -> ObjectF $ renameKey key txt hm
+                   x -> x
+               )
+        )
+    _ -> pure z
 
 renameKey :: (Hashable k, Eq k) => k -> k -> HashMap k v -> HashMap k v
 renameKey srcKey destKey hm =
@@ -170,9 +218,9 @@ buf_ f = \case
   KeyMove txt -> pure (KeyMove txt)
   KeyEdit txt b -> KeyEdit txt <$> f b
 
-handleEvent :: ZMode -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState -> Vty.Event -> (ZMode, Z.Zipper ValueF FocusState)
-handleEvent mode prevZ z evt =
-  case mode of
+handleEvent :: Z.Zipper ValueF FocusState -> Vty.Event -> Editor (Z.Zipper ValueF FocusState)
+handleEvent z evt = do
+  use mode_ >>= \case
     KeyMove {} -> handleMove
     Move {} -> handleMove
     KeyEdit {} -> handleEdit
@@ -182,39 +230,55 @@ handleEvent mode prevZ z evt =
       case evt of
         EvKey key [] ->
           case key of
-            KChar c -> (mode & buf_ %~ TZ.insertChar c, z)
-            KLeft -> (mode & buf_ %~ TZ.moveLeft, z)
-            KRight -> (mode & buf_ %~ TZ.moveRight, z)
-            KBS -> (mode & buf_ %~ TZ.deletePrevChar, z)
-            KEsc -> z & applyBuf mode
-            _ -> (mode, z)
-        _ -> (mode, z)
+            KChar c -> do
+              mode_ . buf_ %= TZ.insertChar c
+              pure z
+            KLeft -> do
+              mode_ . buf_ %= TZ.moveLeft
+              pure z
+            KRight -> do
+              mode_ . buf_ %= TZ.moveRight
+              pure z
+            KBS -> do
+              mode_ . buf_ %= TZ.deletePrevChar
+              pure z
+            KEsc ->
+              applyBuf z
+            _ -> pure z
+        _ -> pure z
     handleMove =
       case evt of
         EvKey key _mods -> case key of
-          KChar 'h' -> z & outOf mode
-          KChar 'l' -> z & into mode
-          KChar 'j' -> z & nextSibling mode
-          KChar 'J' -> (Move, z & moveElement Forward)
-          KChar 'K' -> (Move, z & moveElement Backward)
-          KChar 'k' -> z & prevSibling mode
-          KChar 'i' -> case mode of
-            KeyMove k -> (KeyEdit k (newBuffer k), z)
-            Move
-              | Just editBuf <- bufferFrom z -> (Edit editBuf, z)
-            _ -> (mode, z)
-          KChar 'b' -> (mode, z & setFocus (BoolF True))
-          KChar 'o' -> (mode, z & setFocus (ObjectF mempty))
-          KChar 'a' -> (mode, z & setFocus (ArrayF mempty))
-          KChar 'n' -> (mode, z & setFocus (NumberF 0))
-          KChar 's' -> (mode, z & setFocus (StringF ""))
-          KChar 't' -> (mode, z & setFocus (StringF ""))
-          KChar 'u' -> (mode, prevZ)
-          KChar ' ' -> (mode, z & tryToggle)
+          KChar 'h' -> z & outOf
+          KChar 'l' -> z & into
+          KChar 'j' -> z & sibling Forward
+          KChar 'J' -> do
+            pure (z & moveElement Forward)
+          KChar 'K' ->
+            pure (z & moveElement Backward)
+          KChar 'k' -> z & sibling Backward
+          KChar 'i' ->
+            use mode_ >>= \case
+              KeyMove k -> do
+                mode_ .= KeyEdit k (newBuffer k)
+                pure z
+              Move
+                | Just editBuf <- bufferFrom z -> do
+                  mode_ .= Edit editBuf
+                  pure z
+              _ -> pure z
+          KChar 'b' -> pure (z & setFocus (BoolF True))
+          KChar 'o' -> pure (z & setFocus (ObjectF mempty))
+          KChar 'a' -> pure (z & setFocus (ArrayF mempty))
+          KChar 'n' -> pure (z & setFocus (NumberF 0))
+          KChar 's' -> pure (z & setFocus (StringF ""))
+          KChar 't' -> pure (z & setFocus (StringF ""))
+          -- KChar 'u' -> pure (prevZ)
+          KChar ' ' -> pure (z & tryToggle)
           KEnter -> tryInsert z
-          KBS -> delete mode z
-          _ -> (mode, z)
-        _ -> (mode, z)
+          KBS -> delete z
+          _ -> pure z
+        _ -> pure z
 
 setFocus :: ValueF (Cofree ValueF FocusState) -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
 setFocus f z = z & Z.branches_ .~ f
@@ -250,60 +314,79 @@ tryToggle z =
     BoolF b -> BoolF (not b)
     x -> x
 
-tryInsert :: Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
-tryInsert =
-  Z.branches_ %%~ \case
-    ObjectF hm -> (KeyEdit "" $ newBuffer "", ObjectF $ HM.insert "" (NotFocused :< NullF) hm)
-    ArrayF arr -> (Move, ArrayF $ arr <> pure (NotFocused :< NullF))
-    x -> (Move, x)
+tryInsert :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
+tryInsert z =
+  z & Z.branches_ %%~ \case
+    ObjectF hm -> do
+      mode_ .= (KeyEdit "" $ newBuffer "")
+      pure $ ObjectF $ HM.insert "" (NotFocused :< NullF) hm
+    ArrayF arr -> do
+      mode_ .= Move
+      pure $ ArrayF $ arr <> pure (NotFocused :< NullF)
+    x -> pure x
 
-delete :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
-delete mode z =
-  let z' =
-        case z ^. Z.branches_ of
-          -- If we're in a Key focus, delete that key
-          ObjectF hm
-            | KeyMove k <- mode -> (z & Z.branches_ .~ ObjectF (HM.delete k hm))
-          -- Otherwise move up a layer and delete the key we were in.
-          _ -> case Z.currentIndex z of
-            -- If we don't have a parent, set the current node to null
-            Nothing -> z & Z.branches_ .~ NullF
-            Just i -> fromMaybe z $ do
-              parent <- Z.up z
-              pure $
-                parent & Z.branches_ %~ \case
-                  ObjectF hm | Key k <- i -> ObjectF (HM.delete k hm)
-                  ArrayF arr | Index j <- i -> ArrayF (Vector.ifilter (\i' _ -> i' /= j) arr)
-                  x -> x
-   in (Move, z')
+delete :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
+delete z = do
+  curMode <- use mode_
+  mode_ .= Move
+  pure $ case z ^. Z.branches_ of
+    -- If we're in a Key focus, delete that key
+    ObjectF hm
+      | KeyMove k <- curMode -> (z & Z.branches_ .~ ObjectF (HM.delete k hm))
+    -- Otherwise move up a layer and delete the key we were in.
+    _ -> case Z.currentIndex z of
+      -- If we don't have a parent, set the current node to null
+      Nothing -> z & Z.branches_ .~ NullF
+      Just i -> fromMaybe z $ do
+        parent <- Z.up z
+        pure $
+          parent & Z.branches_ %~ \case
+            ObjectF hm | Key k <- i -> ObjectF (HM.delete k hm)
+            ArrayF arr | Index j <- i -> ArrayF (Vector.ifilter (\i' _ -> i' /= j) arr)
+            x -> x
 
-nextSibling :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
-nextSibling mode z = fromMaybe (mode, z) $ do
+sibling :: Dir -> Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
+sibling dir z = recover z $ do
+  mode <- use mode_
   case (mode, Z.branches z) of
     (KeyMove k, ObjectF hm) -> do
-      nextKey <- findAfter (== k) $ HashMap.keys hm
-      pure $ (KeyMove nextKey, z)
+      case findSiblingIndex (== k) $ HashMap.keys hm of
+        Nothing -> pure z
+        Just theKey -> do
+          mode_ .= KeyMove theKey
+          pure z
     _ -> do
-      parent <- Z.up z
-      curI <- Z.currentIndex z
+      parent <- hoistMaybe $ Z.up z
+      curI <- hoistMaybe $ Z.currentIndex z
       let newI = case Z.branches parent of
             ObjectF hm -> do
               let keys = HM.keys hm
-              newKey <- findAfter (\k -> Key k == curI) keys
+              newKey <- findSiblingIndex (\k -> Key k == curI) keys
               pure $ Key newKey
             ArrayF xs -> case curI of
-              (Index i) | i < (length xs - 1) -> pure . Index $ i + 1
+              (Index i) -> alterIndex xs i
               _ -> Nothing
             StringF {} -> Nothing
             NumberF {} -> Nothing
             BoolF {} -> Nothing
             NullF -> Nothing
       case newI of
-        Just i -> (mode,) <$> Z.down i parent
-        Nothing -> do
-          (nextMode, nextZ) <- nextSibling mode <$> Z.up z
-          fstI <- getFirstIdx (Z.branches nextZ)
-          (nextMode,) <$> Z.down fstI nextZ
+        Just i -> hoistMaybe $ Z.down i parent
+        Nothing -> hoistMaybe Nothing
+  where
+    -- nextZ <- lift $ sibling dir parent
+    -- fstI <- hoistMaybe $ getFirstIdx (Z.branches nextZ)
+    -- hoistMaybe $ Z.down fstI nextZ
+
+    (findSiblingIndex, alterIndex) = case dir of
+      Forward ->
+        ( findAfter,
+          \xs i -> if i < length xs - 1 then Just (Index (i + 1)) else Nothing
+        )
+      Backward ->
+        ( findBefore,
+          \_xs i -> if i > 0 then Just (Index (i -1)) else Nothing
+        )
 
 findAfter :: (a -> Bool) -> [a] -> Maybe a
 findAfter p xs = fmap snd . List.find (p . fst) $ zip xs (drop 1 xs)
@@ -311,79 +394,58 @@ findAfter p xs = fmap snd . List.find (p . fst) $ zip xs (drop 1 xs)
 findBefore :: (a -> Bool) -> [a] -> Maybe a
 findBefore p xs = fmap snd . List.find (p . fst) $ zip (drop 1 xs) xs
 
-prevSibling :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
-prevSibling mode z = fromMaybe (mode, z) $ do
-  case (mode, Z.branches z) of
-    (KeyMove k, ObjectF hm) -> do
-      prevKey <- findBefore (== k) $ HashMap.keys hm
-      pure $ (KeyMove prevKey, z)
-    _ -> do
-      parent <- Z.up z
-      curI <- Z.currentIndex z
-      let newI = case Z.branches parent of
-            ObjectF hm -> do
-              let keys = HM.keys hm
-              newKey <- findBefore (\k -> Key k == curI) keys
-              pure $ Key newKey
-            ArrayF _ -> case curI of
-              (Index i) | i > 0 -> pure . Index $ i - 1
-              _ -> Nothing
-            StringF {} -> Nothing
-            NumberF {} -> Nothing
-            BoolF {} -> Nothing
-            NullF -> Nothing
-      case newI of
-        Just i -> (mode,) <$> Z.down i parent
-        Nothing -> do
-          (prevMode, prevZ) <- prevSibling mode <$> Z.up z
-          lstI <- getLastIdx (Z.branches prevZ)
-          (prevMode,) <$> Z.down lstI prevZ
+-- getFirstIdx :: ValueF x -> Maybe JIndex
+-- getFirstIdx = \case
+--   ObjectF hm -> Key . fst <$> uncons (HM.keys hm)
+--   ArrayF Empty -> Nothing
+--   ArrayF {} -> Just $ Index 0
+--   StringF {} -> Nothing
+--   NumberF {} -> Nothing
+--   BoolF {} -> Nothing
+--   NullF -> Nothing
 
-getFirstIdx :: ValueF x -> Maybe JIndex
-getFirstIdx = \case
-  ObjectF hm -> Key . fst <$> uncons (HM.keys hm)
-  ArrayF Empty -> Nothing
-  ArrayF {} -> Just $ Index 0
-  StringF {} -> Nothing
-  NumberF {} -> Nothing
-  BoolF {} -> Nothing
-  NullF -> Nothing
-
-getLastIdx :: ValueF x -> Maybe JIndex
-getLastIdx = \case
-  ObjectF hm -> Key . snd <$> unsnoc (HM.keys hm)
-  ArrayF Empty -> Nothing
-  ArrayF vec -> Just $ Index (length vec - 1)
-  StringF {} -> Nothing
-  NumberF {} -> Nothing
-  BoolF {} -> Nothing
-  NullF -> Nothing
+-- getLastIdx :: ValueF x -> Maybe JIndex
+-- getLastIdx = \case
+--   ObjectF hm -> Key . snd <$> unsnoc (HM.keys hm)
+--   ArrayF Empty -> Nothing
+--   ArrayF vec -> Just $ Index (length vec - 1)
+--   StringF {} -> Nothing
+--   NumberF {} -> Nothing
+--   BoolF {} -> Nothing
+--   NullF -> Nothing
 
 newBuffer :: Text -> Buffer
 newBuffer txt = TZ.gotoEOF $ TZ.textZipper (Text.lines txt) Nothing
 
-into :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
-into mode z =
+into :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
+into z = do
+  mode <- use mode_
   case (Z.branches z, mode) of
     (ObjectF _, KeyMove key) -> do
-      (Move, Z.tug (Z.down (Key key)) z)
+      mode_ .= Move
+      pure (Z.tug (Z.down (Key key)) z)
     (ObjectF hm, Move) -> do
       case (HM.keys hm) ^? _head of
-        Just fstKey -> (KeyMove fstKey, z)
-        _ -> (mode, z)
-    (ArrayF {}, _) ->
-      (mode, Z.tug (Z.down (Index 0)) z)
-    _ -> (mode, z)
+        Just fstKey -> do
+          mode_ .= KeyMove fstKey
+          pure z
+        _ -> pure z
+    (ArrayF {}, _) -> do
+      pure $ Z.tug (Z.down (Index 0)) z
+    _ -> pure z
 
-outOf :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
-outOf mode z =
+outOf :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
+outOf z = do
+  mode <- use mode_
   case (Z.branches z, mode) of
-    (ObjectF _, KeyMove {}) -> (Move, z)
-    _ -> (mode, Z.tug Z.up z)
+    (ObjectF _, KeyMove {}) -> do
+      mode_ .= Move
+      pure z
+    _ -> pure (Z.tug Z.up z)
 
 -- Render the given zipper
 fullRender :: ZMode -> Z.Zipper ValueF FocusState -> PrettyJSON
-fullRender mode z =
+fullRender mode z = do
   Z.fold alg $ (z & Z.focus_ .~ Focused)
   where
     alg foc vf = renderSubtree foc mode vf

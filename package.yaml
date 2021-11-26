@@ -27,6 +27,7 @@ dependencies:
 - lens
 - recursion-schemes
 - mtl
+- transformers
 - containers
 - vty
 - text

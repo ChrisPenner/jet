@@ -69,6 +69,7 @@ library
     , scientific
     , text
     , text-zipper
+    , transformers
     , unordered-containers
     , vector
     , vty
@@ -119,6 +120,7 @@ executable structural-json-exe
     , structural-json
     , text
     , text-zipper
+    , transformers
     , unordered-containers
     , vector
     , vty
@@ -170,6 +172,7 @@ test-suite structural-json-test
     , structural-json
     , text
     , text-zipper
+    , transformers
     , unordered-containers
     , vector
     , vty

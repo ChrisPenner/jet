@@ -5,6 +5,7 @@ https://user-images.githubusercontent.com/6439644/142779507-8b32ac10-e268-4f67-a
 
 # TODO:
 
+- [ ] Proper scrolling support
 - [x] Insert/remove keys & list values
 - [ ] Ability to copy/paste values
 - [x] Shuffle list values around each other.
