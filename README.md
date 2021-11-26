@@ -11,8 +11,8 @@ https://user-images.githubusercontent.com/6439644/142779507-8b32ac10-e268-4f67-a
 - [x] Shuffle list values around each other.
 - [x] Undo system.
 - [ ] Redo system.
-- [ ] display Keymap/help
-- [ ] Accept input from stdin
+- [x] display Keymap/help
+- [x] Accept input from stdin
 - [ ] Revive render caching 
 - [ ] Improve renders on huge docs by lazily selecting the visible lines.
 - [ ] Improve Performance on big files

@@ -63,7 +63,8 @@ hoistMaybe = MaybeT . pure
 data ZState = ZState
   { _undo :: [Z.Zipper ValueF FocusState],
     _mode :: ZMode,
-    _register :: ValueF (Cofree ValueF FocusState)
+    _register :: ValueF (Cofree ValueF FocusState),
+    _vty :: Vty.Vty
   }
 
 newtype Editor a = Editor {runEditor :: StateT ZState IO a}
@@ -77,6 +78,9 @@ register_ = lens _register (\s m -> s {_register = m})
 
 undo_ :: Lens' ZState [Z.Zipper ValueF FocusState]
 undo_ = lens _undo (\s m -> s {_undo = m})
+
+vty_ :: Lens' ZState Vty.Vty
+vty_ = lens _vty (\s m -> s {_vty = m})
 
 recover :: a -> MaybeT Editor a -> Editor a
 recover def m = do
@@ -126,7 +130,7 @@ edit input value = do
   config <- liftIO $ Vty.standardIOConfig
   vty <- liftIO $ Vty.mkVty config {Vty.inputFd = input}
   let start = Z.zipper . toCofree $ value
-  v <- flip evalStateT startState . runEditor $ loop vty start
+  v <- flip evalStateT (startState vty) . runEditor $ loop vty start
   liftIO $ Vty.shutdown vty
   pure (Z.flatten v)
 
@@ -135,16 +139,23 @@ loop ::
   Z.Zipper ValueF FocusState ->
   Editor (Z.Zipper ValueF FocusState)
 loop vty z = do
-  winHeight <- liftIO . fmap Vty.regionHeight . Vty.displayBounds . Vty.outputIface $ vty
+  (winWidth, winHeight) <- liftIO . Vty.displayBounds . Vty.outputIface $ vty
   rendered <- uses mode_ (\m -> fullRender m z)
-  let screen = Vty.vertCat . Render.renderScreen winHeight . layoutSmart defaultLayoutOptions $ rendered
-  liftIO $ Vty.update vty (Vty.picForImage screen)
+  let screen = Vty.vertCat . Render.renderScreen (winHeight - Vty.imageHeight (footerImg winWidth)) . layoutSmart defaultLayoutOptions $ rendered
+  let spacerHeight = winHeight - (Vty.imageHeight screen + Vty.imageHeight (footerImg winWidth))
+  let spacers = Vty.charFill Vty.defAttr ' ' winWidth spacerHeight
+  liftIO $ Vty.update vty (Vty.picForImage (screen Vty.<-> spacers Vty.<-> (footerImg winWidth)))
   e <- liftIO $ Vty.nextEvent vty
   nextZ <- handleEvent z e
   if (maybeQuit e)
     then pure nextZ
     else (loop vty nextZ)
-  where
+
+footerImg :: Int -> Vty.Image
+footerImg w =
+  let attr = (Vty.defAttr `Vty.withForeColor` Vty.green `Vty.withStyle` Vty.reverseVideo)
+      txt = Vty.text' attr "?: Help"
+   in txt Vty.<|> Vty.charFill attr ' ' (w - Vty.imageWidth txt) 1
 
 pushUndo :: Z.Zipper ValueF FocusState -> Editor ()
 pushUndo z =
@@ -156,12 +167,13 @@ pushUndo z =
 -- log a = do
 --   liftIO $ appendFile "log.txt" (show a <> "\n")
 
-startState :: ZState
-startState =
+startState :: Vty.Vty -> ZState
+startState vty =
   ZState
     { _undo = [],
       _mode = Move,
-      _register = NullF
+      _register = NullF,
+      _vty = vty
     }
 
 maybeQuit :: Vty.Event -> Bool
@@ -309,6 +321,9 @@ handleEvent z evt = do
           KChar 'n' -> do
             pushUndo z
             pure (z & setFocus (NumberF 0))
+          KChar 'N' -> do
+            pushUndo z
+            pure (z & setFocus NullF)
           KChar 's' -> do
             pushUndo z
             pure (z & setFocus (StringF ""))
@@ -330,6 +345,11 @@ handleEvent z evt = do
           KChar 'p' -> do
             reg <- use register_
             pure (z & setFocus reg)
+          KChar '?' -> do
+            vty <- use vty_
+            liftIO $ Vty.update vty (Vty.picForImage helpImg)
+            void $ liftIO $ Vty.nextEvent vty
+            pure z
           KEnter -> do
             pushUndo z
             tryInsert z
@@ -633,3 +653,33 @@ toCofree t = Cofree.unfold (\b -> (NotFocused, FF.project b)) t
 
 bufferFrom :: Z.Zipper ValueF a -> Maybe Buffer
 bufferFrom z = newBuffer <$> (Z.branches z ^? valueFText)
+
+helpImg :: Vty.Image
+helpImg =
+  let keys =
+        [ ("h", "ascend"),
+          ("l", "descend"),
+          ("j", "next sibling"),
+          ("k", "previous sibling"),
+          ("J", "move down (in array)"),
+          ("K", "move up (in array)"),
+          ("i", "enter edit mode (string/number)"),
+          ("<space>", "toggle boolean"),
+          ("<escape>", "exit edit mode"),
+          ("<backspace>", "delete key/element"),
+          ("<enter>", "add new key/element (object/array)"),
+          ("s", "replace element with string"),
+          ("b", "replace element with bool"),
+          ("n", "replace element with number"),
+          ("N", "replace element with null"),
+          ("a", "replace element with array"),
+          ("o", "replace element with object"),
+          ("u", "undo last change"),
+          ("y", "copy current value into buffer (and clipboard)"),
+          ("p", "paste value from buffer over current value")
+        ]
+   in Vty.vertCat
+        ( keys <&> \(key, desc) ->
+            Vty.text' (Vty.defAttr `Vty.withForeColor` Vty.green) (key <> ": ")
+              Vty.<|> Vty.text' Vty.defAttr desc
+        )
