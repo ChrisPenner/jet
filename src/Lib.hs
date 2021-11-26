@@ -49,6 +49,7 @@ import qualified Graphics.Vty as Vty
 import Graphics.Vty.Input.Events
 import Prettyprinter as P
 import Prettyprinter.Render.Terminal as P
+import qualified Render
 import qualified System.Console.ANSI as ANSI
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
@@ -89,7 +90,7 @@ recover def m = do
 data Focused = Focused | NotFocused
   deriving (Eq)
 
-type PrettyJSON = Doc AnsiStyle
+type PrettyJSON = Doc (Either Render.Cursor AnsiStyle)
 
 type Buffer = TZ.TextZipper Text
 
@@ -119,14 +120,16 @@ loop ::
   Z.Zipper ValueF FocusState ->
   Editor (Z.Zipper ValueF FocusState)
 loop vty z = do
+  winHeight <- liftIO . fmap Vty.regionHeight . Vty.displayBounds . Vty.outputIface $ vty
   rendered <- uses mode_ (\m -> fullRender m z)
-  let screen = renderStrict $ layoutSmart defaultLayoutOptions rendered
+  let screen = renderStrict . Render.renderScreen winHeight . layoutSmart defaultLayoutOptions $ rendered
   renderScreen screen
   e <- liftIO $ Vty.nextEvent vty
   nextZ <- handleEvent z e
   if (maybeQuit e)
     then pure nextZ
     else (loop vty nextZ)
+  where
 
 -- Force the screen to whnf before we clear the old screen.
 -- Otherwise it does too much work after clearing but before rendering.
@@ -522,21 +525,21 @@ fullRender mode z = do
 -- | Renders a subtree
 renderSubtree :: Focused -> ZMode -> ValueF PrettyJSON -> PrettyJSON
 renderSubtree foc mode vf = case vf of
-  (StringF txt) -> case (foc, mode) of
+  (StringF txt) -> cursor foc $ case (foc, mode) of
     (Focused, Edit buf) ->
       indent i (colored' Green "\"" <> renderBuffer Green buf <> colored' Green "\",")
     _ -> indent i (colored' Green "\"" <> colored' Green (Text.unpack txt) <> colored' Green "\",")
-  (NullF) -> indent i (colored' Yellow "null,")
-  (NumberF n) -> case (foc, mode) of
+  (NullF) -> cursor foc $ indent i (colored' Yellow "null,")
+  (NumberF n) -> cursor foc $ case (foc, mode) of
     (Focused, Edit buf) -> indent i (renderBuffer Blue buf <> colored' Blue ",")
     _ -> indent i (colored' Blue (show n) <> colored' Blue ",")
-  (BoolF b) -> indent i (colored' Magenta (Text.unpack $ boolText_ # b) <> pretty ',')
+  (BoolF b) -> cursor foc $ indent i (colored' Magenta (Text.unpack $ boolText_ # b) <> pretty ',')
   (ArrayF xs) -> prettyArray foc xs
   (ObjectF xs) -> prettyObj foc mode xs
   where
     colored' :: Color -> String -> PrettyJSON
     colored' col txt =
-      P.annotate (if foc == Focused then reverseCol col else colorDull col) (pretty txt)
+      P.annotate (Right $ if foc == Focused then reverseCol col else colorDull col) (pretty txt)
     i = 2
 
 reverseCol :: Color -> AnsiStyle
@@ -545,11 +548,11 @@ reverseCol = \case
   Green -> colorDull Black <> bgColorDull Green
   c -> bgColorDull c
 
-prettyWith :: Pretty a => ann -> a -> Doc ann
-prettyWith ann a = annotate ann $ pretty a
+prettyWith :: Pretty a => AnsiStyle -> a -> PrettyJSON
+prettyWith ann a = annotate (Right ann) $ pretty a
 
-colored :: Pretty a => Color -> a -> Doc AnsiStyle
-colored col a = annotate (colorDull col) $ pretty a
+colored :: Pretty a => Color -> a -> PrettyJSON
+colored col a = annotate (Right $ colorDull col) $ pretty a
 
 renderBuffer :: Color -> Buffer -> PrettyJSON
 renderBuffer col buf =
@@ -562,12 +565,16 @@ renderBuffer col buf =
 prettyArray :: Focused -> Vector PrettyJSON -> PrettyJSON
 prettyArray foc vs =
   let inner :: [PrettyJSON] = (Vector.toList vs)
-   in vsep $ [img "[", indent 2 (vsep inner), img "],"]
+   in cursor foc $ vsep $ [img "[", indent 2 (vsep inner), img "],"]
   where
     img :: Text -> PrettyJSON
     img t = case foc of
       Focused -> prettyWith (reverseCol White) t
       NotFocused -> pretty t
+
+cursor :: Focused -> PrettyJSON -> PrettyJSON
+cursor Focused = P.annotate (Left Render.Cursor)
+cursor _ = id
 
 prettyObj :: Focused -> ZMode -> HashMap Text PrettyJSON -> PrettyJSON
 prettyObj focused mode vs =
@@ -579,13 +586,16 @@ prettyObj focused mode vs =
                       vsep [imgForKey k <> pretty @Text ": ", indent 2 v]
                   )
           )
-   in vsep [img "{", indent 2 inner, img "},"]
+      rendered = vsep [img "{", indent 2 inner, img "},"]
+   in case mode of
+        Move -> cursor focused rendered
+        _ -> rendered
   where
     imgForKey k = case focused of
       NotFocused -> colored Cyan (show k)
       Focused -> case mode of
-        KeyMove focKey | focKey == k -> prettyWith (reverseCol Cyan) (show focKey)
-        KeyEdit focKey buf | focKey == k -> colored Cyan '"' <> renderBuffer Cyan buf <> colored Cyan '"'
+        KeyMove focKey | focKey == k -> cursor Focused $ prettyWith (reverseCol Cyan) (show focKey)
+        KeyEdit focKey buf | focKey == k -> cursor Focused $ colored Cyan '"' <> renderBuffer Cyan buf <> colored Cyan '"'
         _ -> colored Cyan (show k)
     img :: Text -> PrettyJSON
     img t = case (focused, mode) of
