@@ -48,7 +48,6 @@ import qualified Data.Vector as Vector
 import qualified Graphics.Vty as Vty
 import Graphics.Vty.Input.Events
 import Prettyprinter as P
-import Prettyprinter.Render.Terminal as P
 import qualified Render
 import qualified System.Console.ANSI as ANSI
 import System.Environment (getArgs)
@@ -90,7 +89,7 @@ recover def m = do
 data Focused = Focused | NotFocused
   deriving (Eq)
 
-type PrettyJSON = Doc (Either Render.Cursor AnsiStyle)
+type PrettyJSON = Doc (Either Render.Cursor Vty.Attr)
 
 type Buffer = TZ.TextZipper Text
 
@@ -122,8 +121,8 @@ loop ::
 loop vty z = do
   winHeight <- liftIO . fmap Vty.regionHeight . Vty.displayBounds . Vty.outputIface $ vty
   rendered <- uses mode_ (\m -> fullRender m z)
-  let screen = renderStrict . Render.renderScreen winHeight . layoutSmart defaultLayoutOptions $ rendered
-  renderScreen screen
+  let screen = Vty.vertCat . Render.renderScreen winHeight . layoutSmart defaultLayoutOptions $ rendered
+  liftIO $ Vty.update vty (Vty.picForImage screen)
   e <- liftIO $ Vty.nextEvent vty
   nextZ <- handleEvent z e
   if (maybeQuit e)
@@ -527,34 +526,31 @@ renderSubtree :: Focused -> ZMode -> ValueF PrettyJSON -> PrettyJSON
 renderSubtree foc mode vf = case vf of
   (StringF txt) -> cursor foc $ case (foc, mode) of
     (Focused, Edit buf) ->
-      indent i (colored' Green "\"" <> renderBuffer Green buf <> colored' Green "\",")
-    _ -> indent i (colored' Green "\"" <> colored' Green (Text.unpack txt) <> colored' Green "\",")
-  (NullF) -> cursor foc $ indent i (colored' Yellow "null,")
+      indent i (colored' Vty.green "\"" <> renderBuffer Vty.green buf <> colored' Vty.green "\",")
+    _ -> indent i (colored' Vty.green "\"" <> colored' Vty.green (Text.unpack txt) <> colored' Vty.green "\",")
+  (NullF) -> cursor foc $ indent i (colored' Vty.yellow "null,")
   (NumberF n) -> cursor foc $ case (foc, mode) of
-    (Focused, Edit buf) -> indent i (renderBuffer Blue buf <> colored' Blue ",")
-    _ -> indent i (colored' Blue (show n) <> colored' Blue ",")
-  (BoolF b) -> cursor foc $ indent i (colored' Magenta (Text.unpack $ boolText_ # b) <> pretty ',')
+    (Focused, Edit buf) -> indent i (renderBuffer Vty.blue buf <> colored' Vty.blue ",")
+    _ -> indent i (colored' Vty.blue (show n) <> colored' Vty.blue ",")
+  (BoolF b) -> cursor foc $ indent i (colored' Vty.magenta (Text.unpack $ boolText_ # b) <> pretty ',')
   (ArrayF xs) -> prettyArray foc xs
   (ObjectF xs) -> prettyObj foc mode xs
   where
-    colored' :: Color -> String -> PrettyJSON
+    colored' :: Vty.Color -> String -> PrettyJSON
     colored' col txt =
-      P.annotate (Right $ if foc == Focused then reverseCol col else colorDull col) (pretty txt)
+      P.annotate (Right $ if foc == Focused then reverseCol col else Vty.defAttr `Vty.withForeColor` col) (pretty txt)
     i = 2
 
-reverseCol :: Color -> AnsiStyle
-reverseCol = \case
-  White -> colorDull Black <> bgColorDull White
-  Green -> colorDull Black <> bgColorDull Green
-  c -> bgColorDull c
+reverseCol :: Vty.Color -> Vty.Attr
+reverseCol col = Vty.defAttr `Vty.withForeColor` col `Vty.withStyle` Vty.reverseVideo
 
-prettyWith :: Pretty a => AnsiStyle -> a -> PrettyJSON
+prettyWith :: Pretty a => Vty.Attr -> a -> PrettyJSON
 prettyWith ann a = annotate (Right ann) $ pretty a
 
-colored :: Pretty a => Color -> a -> PrettyJSON
-colored col a = annotate (Right $ colorDull col) $ pretty a
+colored :: Pretty a => Vty.Color -> a -> PrettyJSON
+colored col a = annotate (Right $ Vty.defAttr `Vty.withForeColor` col) $ pretty a
 
-renderBuffer :: Color -> Buffer -> PrettyJSON
+renderBuffer :: Vty.Color -> Buffer -> PrettyJSON
 renderBuffer col buf =
   let (prefix, suffix) = Text.splitAt (snd $ TZ.cursorPosition buf) (bufferText buf)
       suffixImg = case Text.uncons suffix of
@@ -569,7 +565,7 @@ prettyArray foc vs =
   where
     img :: Text -> PrettyJSON
     img t = case foc of
-      Focused -> prettyWith (reverseCol White) t
+      Focused -> prettyWith (reverseCol Vty.white) t
       NotFocused -> pretty t
 
 cursor :: Focused -> PrettyJSON -> PrettyJSON
@@ -592,14 +588,14 @@ prettyObj focused mode vs =
         _ -> rendered
   where
     imgForKey k = case focused of
-      NotFocused -> colored Cyan (show k)
+      NotFocused -> colored Vty.cyan (show k)
       Focused -> case mode of
-        KeyMove focKey | focKey == k -> cursor Focused $ prettyWith (reverseCol Cyan) (show focKey)
-        KeyEdit focKey buf | focKey == k -> cursor Focused $ colored Cyan '"' <> renderBuffer Cyan buf <> colored Cyan '"'
-        _ -> colored Cyan (show k)
+        KeyMove focKey | focKey == k -> cursor Focused $ prettyWith (reverseCol Vty.cyan) (show focKey)
+        KeyEdit focKey buf | focKey == k -> cursor Focused $ colored Vty.cyan '"' <> renderBuffer Vty.cyan buf <> colored Vty.cyan '"'
+        _ -> colored Vty.cyan (show k)
     img :: Text -> PrettyJSON
     img t = case (focused, mode) of
-      (Focused, Move) -> prettyWith (reverseCol White) t
+      (Focused, Move) -> prettyWith (reverseCol Vty.white) t
       _ -> pretty t
 
 instance Eq1 ValueF where
