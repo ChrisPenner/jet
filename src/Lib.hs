@@ -99,26 +99,30 @@ maybeQuit = \case
 bufferText :: Buffer -> Text
 bufferText = Text.concat . TZ.getText
 
-applyBuf :: ZMode -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
+applyBuf :: ZMode -> Z.Zipper ValueF FocusState -> (ZMode, Z.Zipper ValueF FocusState)
 applyBuf mode z =
   case mode of
     Edit buf ->
       let txt = buf ^. to bufferText
-       in z & Z.unwrapped_ . _unwrap
-            %~ ( \case
-                   StringF _ -> StringF txt
-                   (NumberF n) -> NumberF . fromMaybe n . readMaybe $ Text.unpack txt
-                   x -> x
-               )
+       in ( Move,
+            z & Z.unwrapped_ . _unwrap
+              %~ ( \case
+                     StringF _ -> StringF txt
+                     (NumberF n) -> NumberF . fromMaybe n . readMaybe $ Text.unpack txt
+                     x -> x
+                 )
+          )
     KeyEdit key buf -> do
       let txt = buf ^. to bufferText
-       in z & Z.unwrapped_ . _unwrap
-            %~ ( \case
-                   (ObjectF hm) -> ObjectF $ renameKey key txt hm
-                   x -> x
-               )
-    Move -> z
-    KeyMove {} -> z
+       in ( KeyMove txt,
+            z & Z.unwrapped_ . _unwrap
+              %~ ( \case
+                     (ObjectF hm) -> ObjectF $ renameKey key txt hm
+                     x -> x
+                 )
+          )
+    Move -> (Move, z)
+    KeyMove k -> (KeyMove k, z)
 
 renameKey :: (Hashable k, Eq k) => k -> k -> HashMap k v -> HashMap k v
 renameKey srcKey destKey hm =
@@ -182,8 +186,7 @@ handleEvent mode prevZ z evt =
             KLeft -> (mode & buf_ %~ TZ.moveLeft, z)
             KRight -> (mode & buf_ %~ TZ.moveRight, z)
             KBS -> (mode & buf_ %~ TZ.deletePrevChar, z)
-            KEsc -> do
-              (Move, z & applyBuf mode)
+            KEsc -> z & applyBuf mode
             _ -> (mode, z)
         _ -> (mode, z)
     handleMove =
