@@ -27,7 +27,6 @@ library
   exposed-modules:
       Lib
       Render
-      TaggedCofree
   other-modules:
       Paths_structural_json
   hs-source-dirs:
