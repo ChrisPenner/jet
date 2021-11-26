@@ -57,6 +57,9 @@ import qualified System.Posix as Posix
 import Text.Read (readMaybe)
 import qualified Zipper as Z
 
+tabSize :: Int
+tabSize = 2
+
 hoistMaybe :: Maybe a -> MaybeT Editor a
 hoistMaybe = MaybeT . pure
 
@@ -94,11 +97,28 @@ recover def m = do
 data Focused = Focused | NotFocused
   deriving (Eq)
 
+data Folded = Folded | NotFolded
+  deriving (Eq)
+
 type PrettyJSON = Doc (Either Render.Cursor Vty.Attr)
 
 type Buffer = TZ.TextZipper Text
 
-type FocusState = Focused
+data FocusState = FocusState
+  { isFocused :: Focused,
+    isFolded :: Folded
+  }
+  deriving (Eq)
+
+focused_ :: Lens' FocusState Focused
+focused_ = lens isFocused (\fs new -> fs {isFocused = new})
+
+folded_ :: Lens' FocusState Folded
+folded_ = lens isFolded (\fs new -> fs {isFolded = new})
+
+toggleFold :: Folded -> Folded
+toggleFold Folded = NotFolded
+toggleFold NotFolded = Folded
 
 run :: IO ()
 run = do
@@ -146,7 +166,7 @@ loop vty z = do
   let spacers = Vty.charFill Vty.defAttr ' ' winWidth spacerHeight
   liftIO $ Vty.update vty (Vty.picForImage (screen Vty.<-> spacers Vty.<-> (footerImg winWidth)))
   e <- liftIO $ Vty.nextEvent vty
-  nextZ <- handleEvent z e
+  nextZ <- handleEvent e z
   if (maybeQuit e)
     then pure nextZ
     else (loop vty nextZ)
@@ -257,15 +277,15 @@ buf_ f = \case
   KeyMove txt -> pure (KeyMove txt)
   KeyEdit txt b -> KeyEdit txt <$> f b
 
-handleEvent :: Z.Zipper ValueF FocusState -> Vty.Event -> Editor (Z.Zipper ValueF FocusState)
-handleEvent z evt = do
+handleEvent :: Vty.Event -> Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
+handleEvent evt zipper = do
   use mode_ >>= \case
-    KeyMove {} -> handleMove
-    Move {} -> handleMove
-    KeyEdit {} -> handleEdit
-    Edit {} -> handleEdit
+    KeyMove {} -> handleMove zipper
+    Move {} -> handleMove zipper
+    KeyEdit {} -> handleEdit zipper
+    Edit {} -> handleEdit zipper
   where
-    handleEdit =
+    handleEdit z =
       case evt of
         EvKey key [] ->
           case key of
@@ -285,11 +305,13 @@ handleEvent z evt = do
               applyBuf z
             _ -> pure z
         _ -> pure z
-    handleMove =
+    handleMove z =
       case evt of
         EvKey key _mods -> case key of
           KChar 'h' -> z & outOf
-          KChar 'l' -> z & into
+          KChar 'l' -> do
+            z & Z.focus_ . folded_ .~ NotFolded
+              & into
           KChar 'j' -> z & sibling Forward
           KChar 'J' -> do
             pushUndo z
@@ -300,15 +322,7 @@ handleEvent z evt = do
           KChar 'k' -> z & sibling Backward
           KChar 'i' -> do
             pushUndo z
-            use mode_ >>= \case
-              KeyMove k -> do
-                mode_ .= KeyEdit k (newBuffer k)
-                pure z
-              Move
-                | Just editBuf <- bufferFrom z -> do
-                  mode_ .= Edit editBuf
-                  pure z
-              _ -> pure z
+            insert z
           KChar 'b' -> do
             pushUndo z
             pure (z & setFocus (BoolF True))
@@ -338,13 +352,13 @@ handleEvent z evt = do
             pushUndo z
             pure (z & tryToggle)
           KChar 'y' -> do
-            let curVal = Z.branches z
-            register_ .= curVal
-            liftIO $ setClipboard (encodeValueFCofree curVal)
-            pure z
+            copy z
           KChar 'p' -> do
-            reg <- use register_
-            pure (z & setFocus reg)
+            pushUndo z
+            paste z
+          KChar 'x' -> do
+            pushUndo z
+            copy z >>= delete
           KChar '?' -> do
             vty <- use vty_
             liftIO $ Vty.update vty (Vty.picForImage helpImg)
@@ -353,16 +367,38 @@ handleEvent z evt = do
           KEnter -> do
             pushUndo z
             tryInsert z
+          KChar '\t' -> do
+            -- Exit KeyMove mode if we're in it.
+            mode_ .= Move
+            pure $ (z & Z.focus_ . folded_ %~ toggleFold)
           KBS -> do
             pushUndo z
             delete z
           _ -> pure z
         _ -> pure z
+    paste z = do
+      reg <- use register_
+      pure (z & setFocus reg)
+    copy z = do
+      let curVal = Z.branches z
+      register_ .= curVal
+      liftIO $ setClipboard (encodeValueFCofree curVal)
+      pure z
+    insert z = do
+      use mode_ >>= \case
+        KeyMove k -> do
+          mode_ .= KeyEdit k (newBuffer k)
+          pure $ z & Z.focus_ . folded_ .~ NotFolded
+        Move
+          | Just editBuf <- bufferFrom z -> do
+            mode_ .= Edit editBuf
+            pure $ z & Z.focus_ . folded_ .~ NotFolded
+        _ -> pure z
 
 encodeValueFCofree :: ValueF (Cofree ValueF FocusState) -> String
 encodeValueFCofree vf = LBS.unpack . encodePretty . FF.embed $ fmap (FF.cata alg) vf
   where
-    alg :: CofreeF.CofreeF ValueF Focused Value -> Value
+    alg :: CofreeF.CofreeF ValueF ann Value -> Value
     alg (_ CofreeF.:< vf') = FF.embed vf'
 
 setFocus :: ValueF (Cofree ValueF FocusState) -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
@@ -404,11 +440,13 @@ tryInsert z =
   z & Z.branches_ %%~ \case
     ObjectF hm -> do
       mode_ .= (KeyEdit "" $ newBuffer "")
-      pure $ ObjectF $ HM.insert "" (NotFocused :< NullF) hm
+      pure $ ObjectF $ HM.insert "" (fs :< NullF) hm
     ArrayF arr -> do
       mode_ .= Move
-      pure $ ArrayF $ arr <> pure (NotFocused :< NullF)
+      pure $ ArrayF $ arr <> pure (fs :< NullF)
     x -> pure x
+  where
+    fs = FocusState NotFocused NotFolded
 
 delete :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
 delete z = do
@@ -513,29 +551,39 @@ outOf z = do
 -- Render the given zipper
 fullRender :: ZMode -> Z.Zipper ValueF FocusState -> PrettyJSON
 fullRender mode z = do
-  Z.fold alg $ (z & Z.focus_ .~ Focused)
+  Z.fold alg $ (z & Z.focus_ . focused_ .~ Focused)
   where
     alg foc vf = renderSubtree foc mode vf
 
 -- | Renders a subtree
-renderSubtree :: Focused -> ZMode -> ValueF PrettyJSON -> PrettyJSON
-renderSubtree foc mode vf = case vf of
-  (StringF txt) -> cursor foc $ case (foc, mode) of
-    (Focused, Edit buf) ->
-      indent i (colored' Vty.green "\"" <> renderBuffer Vty.green buf <> colored' Vty.green "\",")
-    _ -> indent i (colored' Vty.green "\"" <> colored' Vty.green (Text.unpack txt) <> colored' Vty.green "\",")
-  (NullF) -> cursor foc $ indent i (colored' Vty.yellow "null,")
-  (NumberF n) -> cursor foc $ case (foc, mode) of
-    (Focused, Edit buf) -> indent i (renderBuffer Vty.blue buf <> colored' Vty.blue ",")
-    _ -> indent i (colored' Vty.blue (show n) <> colored' Vty.blue ",")
-  (BoolF b) -> cursor foc $ indent i (colored' Vty.magenta (Text.unpack $ boolText_ # b) <> pretty ',')
-  (ArrayF xs) -> prettyArray foc xs
-  (ObjectF xs) -> prettyObj foc mode xs
+renderSubtree :: FocusState -> ZMode -> ValueF PrettyJSON -> PrettyJSON
+renderSubtree (FocusState {isFolded = Folded, isFocused}) _ vf = case vf of
+  ObjectF {} -> colored' Vty.white "{...}"
+  ArrayF {} -> colored' Vty.white "[...]"
+  StringF {} -> colored' Vty.green "\"...\""
+  NumberF {} -> colored' Vty.blue "..."
+  NullF {} -> colored' Vty.yellow "..."
+  BoolF {} -> colored' Vty.magenta "..."
   where
     colored' :: Vty.Color -> String -> PrettyJSON
     colored' col txt =
-      P.annotate (Right $ if foc == Focused then reverseCol col else Vty.defAttr `Vty.withForeColor` col) (pretty txt)
-    i = 2
+      P.annotate (Right $ if isFocused == Focused then reverseCol col else Vty.defAttr `Vty.withForeColor` col) (pretty txt)
+renderSubtree (FocusState {isFocused}) mode vf = case vf of
+  (StringF txt) -> cursor isFocused $ case (isFocused, mode) of
+    (Focused, Edit buf) ->
+      colored' Vty.green "\"" <> renderBuffer Vty.green buf <> colored' Vty.green "\""
+    _ -> colored' Vty.green "\"" <> colored' Vty.green (Text.unpack txt) <> colored' Vty.green "\""
+  (NullF) -> cursor isFocused $ colored' Vty.yellow "null"
+  (NumberF n) -> cursor isFocused $ case (isFocused, mode) of
+    (Focused, Edit buf) -> renderBuffer Vty.blue buf
+    _ -> colored' Vty.blue (show n)
+  (BoolF b) -> cursor isFocused $ colored' Vty.magenta (Text.unpack $ boolText_ # b)
+  (ArrayF xs) -> prettyArray isFocused xs
+  (ObjectF xs) -> prettyObj isFocused mode xs
+  where
+    colored' :: Vty.Color -> String -> PrettyJSON
+    colored' col txt =
+      P.annotate (Right $ if isFocused == Focused then reverseCol col else Vty.defAttr `Vty.withForeColor` col) (pretty txt)
 
 reverseCol :: Vty.Color -> Vty.Attr
 reverseCol col = Vty.defAttr `Vty.withForeColor` col `Vty.withStyle` Vty.reverseVideo
@@ -556,13 +604,18 @@ renderBuffer col buf =
 
 prettyArray :: Focused -> Vector PrettyJSON -> PrettyJSON
 prettyArray foc vs =
-  let inner :: [PrettyJSON] = (Vector.toList vs)
-   in cursor foc $ vsep $ [img "[", indent 2 (vsep inner), img "],"]
+  let inner :: [PrettyJSON] =
+        Vector.toList vs
+          & imap (\i v -> v <> commaKey i)
+   in cursor foc $ vsep $ [img "[", indent tabSize (vsep inner), img "]"]
   where
     img :: Text -> PrettyJSON
     img t = case foc of
       Focused -> prettyWith (reverseCol Vty.white) t
       NotFocused -> pretty t
+    commaKey i
+      | i == Vector.length vs - 1 = mempty
+      | otherwise = ","
 
 cursor :: Focused -> PrettyJSON -> PrettyJSON
 cursor Focused = P.annotate (Left Render.Cursor)
@@ -574,15 +627,20 @@ prettyObj focused mode vs =
       inner =
         vsep
           ( HM.toList vs
-              <&> ( \(k, v) ->
-                      vsep [imgForKey k <> pretty @Text ": ", indent 2 v]
-                  )
+              & imap
+                ( \i (k, v) ->
+                    vsep [imgForKey k <> pretty @Text ": ", indent tabSize (v <> commaKey i)]
+                )
           )
-      rendered = vsep [img "{", indent 2 inner, img "},"]
+      rendered = vsep [img "{", indent tabSize inner, img "}"]
    in case mode of
         Move -> cursor focused rendered
         _ -> rendered
   where
+    hmSize = HM.size vs
+    commaKey i
+      | i == hmSize - 1 = mempty
+      | otherwise = ","
     imgForKey k = case focused of
       NotFocused -> colored Vty.cyan (show k)
       Focused -> case mode of
@@ -649,7 +707,9 @@ instance Z.Idx ValueF where
   idx _ _ x = pure x
 
 toCofree :: (Value -> Cofree ValueF FocusState)
-toCofree t = Cofree.unfold (\b -> (NotFocused, FF.project b)) t
+toCofree t = Cofree.unfold (\b -> (fs, FF.project b)) t
+  where
+    fs = FocusState NotFocused NotFolded
 
 bufferFrom :: Z.Zipper ValueF a -> Maybe Buffer
 bufferFrom z = newBuffer <$> (Z.branches z ^? valueFText)
