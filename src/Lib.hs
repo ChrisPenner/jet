@@ -371,11 +371,13 @@ handleEvent evt zipper = do
             pushUndo z
             pure (z & tryToggle)
           KChar 'y' -> do
+            flash_ .= "Copied"
             copy z
           KChar 'p' -> do
             pushUndo z
             paste z
           KChar 'x' -> do
+            flash_ .= "Cut"
             pushUndo z
             copy z >>= delete
           KChar '?' -> do
@@ -391,6 +393,7 @@ handleEvent evt zipper = do
             mode_ .= Move
             pure $ (z & Z.focus_ . folded_ %~ toggleFold)
           KBS -> do
+            flash_ .= "Deleted"
             pushUndo z
             delete z
           _ -> pure z
