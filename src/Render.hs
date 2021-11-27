@@ -11,6 +11,7 @@ import Prettyprinter
 import Prettyprinter.Render.Util.StackMachine (renderSimplyDecoratedA)
 
 data Cursor = Cursor
+  deriving (Show, Eq)
 
 data Output = LineBreak | ImgChunk Vty.Image
 

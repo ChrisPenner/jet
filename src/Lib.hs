@@ -19,8 +19,9 @@
 
 module Lib (run) where
 
+import Control.Category ((>>>))
+import Control.Comonad (extract)
 import Control.Comonad.Cofree
-import qualified Control.Comonad.Cofree as Cofree
 import qualified Control.Comonad.Trans.Cofree as CofreeF
 import Control.Lens hiding ((:<))
 import qualified Control.Lens.Cons as Cons
@@ -115,12 +116,20 @@ type Buffer = TZ.TextZipper Text
 
 data FocusState = FocusState
   { isFocused :: Focused,
-    isFolded :: Folded
+    isFolded :: Folded,
+    rendered :: PrettyJSON
   }
-  deriving (Eq)
+
+instance Eq FocusState where
+  a == b =
+    isFocused a == isFocused b
+      && isFolded a == isFolded b
 
 focused_ :: Lens' FocusState Focused
 focused_ = lens isFocused (\fs new -> fs {isFocused = new})
+
+rendered_ :: Lens' FocusState PrettyJSON
+rendered_ = lens rendered (\fs new -> fs {rendered = new})
 
 folded_ :: Lens' FocusState Folded
 folded_ = lens isFolded (\fs new -> fs {isFolded = new})
@@ -325,7 +334,8 @@ handleEvent evt zipper = do
               mode_ . buf_ %= TZ.deletePrevChar
               pure z
             KEsc -> do
-              applyBuf z
+              newZ <- applyBuf z
+              pure $ newZ & rerender
             _ -> pure z
         _ -> pure z
     handleMove z =
@@ -396,7 +406,7 @@ handleEvent evt zipper = do
             pure z
           KEnter -> do
             pushUndo z
-            tryInsert z
+            tryAddChild z
           KChar '\t' -> do
             -- Exit KeyMove mode if we're in it.
             mode_ .= Move
@@ -433,7 +443,7 @@ encodeValueFCofree vf = LBS.unpack . encodePretty . FF.embed $ fmap (FF.cata alg
     alg (_ CofreeF.:< vf') = FF.embed vf'
 
 setFocus :: ValueF (Cofree ValueF FocusState) -> Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
-setFocus f z = z & Z.branches_ .~ f
+setFocus f z = z & Z.branches_ .~ f & rerender
 
 data Dir = Forward | Backward
 
@@ -442,7 +452,7 @@ moveElement dir z = fromMaybe z $ do
   i <- case Z.currentIndex z of
     Just (Index i) -> pure i
     _ -> Nothing
-  parent <- Z.up z
+  parent <- z & rerender & Z.up
   pure $
     case parent ^. Z.branches_ of
       ArrayF arr ->
@@ -465,19 +475,18 @@ tryToggle z =
   z & Z.branches_ %~ \case
     BoolF b -> BoolF (not b)
     x -> x
+    & rerender
 
-tryInsert :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
-tryInsert z =
+tryAddChild :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
+tryAddChild z =
   z & Z.branches_ %%~ \case
     ObjectF hm -> do
       mode_ .= (KeyEdit "" $ newBuffer "")
-      pure $ ObjectF $ HM.insert "" (fs :< NullF) hm
+      pure $ ObjectF $ HM.insert "" (toCofree Aeson.Null) hm
     ArrayF arr -> do
       mode_ .= Move
-      pure $ ArrayF $ arr <> pure (fs :< NullF)
+      pure $ ArrayF $ arr <> pure (toCofree Aeson.Null)
     x -> pure x
-  where
-    fs = FocusState NotFocused NotFolded
 
 delete :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
 delete z = do
@@ -486,13 +495,18 @@ delete z = do
   pure $ case z ^. Z.branches_ of
     -- If we're in a Key focus, delete that key
     ObjectF hm
-      | KeyMove k <- curMode -> (z & Z.branches_ .~ ObjectF (HM.delete k hm))
+      | KeyMove k <- curMode ->
+        ( z & Z.branches_ .~ ObjectF (HM.delete k hm)
+            & rerender
+        )
     -- Otherwise move up a layer and delete the key we were in.
     _ -> case Z.currentIndex z of
       -- If we don't have a parent, set the current node to null
-      Nothing -> z & Z.branches_ .~ NullF
+      Nothing ->
+        z & Z.branches_ .~ NullF
+          & rerender
       Just i -> fromMaybe z $ do
-        parent <- Z.up z
+        parent <- z & rerender & Z.up
         pure $
           parent & Z.branches_ %~ \case
             ObjectF hm | Key k <- i -> ObjectF (HM.delete k hm)
@@ -510,8 +524,8 @@ sibling dir z = recover z $ do
           mode_ .= KeyMove theKey
           pure z
     _ -> do
-      parent <- hoistMaybe $ Z.up z
       curI <- hoistMaybe $ Z.currentIndex z
+      parent <- hoistMaybe $ (z & rerender & Z.up)
       let newI = case Z.branches parent of
             ObjectF hm -> do
               let keys = HM.keys hm
@@ -577,14 +591,37 @@ outOf z = do
       pure z
     _ -> do
       maybe (pure ()) (\k -> mode_ .= KeyMove k) maybeParentKey
-      pure (Z.tug Z.up z)
+      pure (Z.tug (rerender >>> Z.up) z)
 
--- Render the given zipper
+-- Render the given zipper using render caches stored in each node.
 fullRender :: ZMode -> Z.Zipper ValueF FocusState -> PrettyJSON
 fullRender mode z = do
-  Z.fold alg $ (z & Z.focus_ . focused_ .~ Focused)
+  let focusedRender =
+        z & Z.focus_ . focused_ .~ Focused
+          & Z.unwrapped_ %~ \(fs :< vf) ->
+            let rerendered = renderSubtree fs mode (rendered . extract <$> vf)
+             in (fs {rendered = rerendered} :< vf)
+  rendered . Z.foldSpine alg $ focusedRender
   where
-    alg foc vf = renderSubtree foc mode vf
+    alg fs vf =
+      fs {rendered = rerenderCached fs (rendered <$> vf)}
+    rerenderCached fs = \case
+      ObjectF o -> prettyObj (isFocused fs) mode o
+      ArrayF a -> prettyArray (isFocused fs) a
+      -- Nodes without children are never part of the spine, but just to have something
+      -- we can render the cache.
+      _ -> rendered fs
+
+-- | Updates the cached render of the current focus, using cached renders for subtrees.
+rerender :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
+rerender z =
+  let (fs :< vf) = z ^. Z.unwrapped_
+   in z & Z.focus_ . rendered_ .~ (renderSubtree fs mode (rendered . extract <$> vf))
+  where
+    -- Currently the mode is required by renderSubtree, but for the rerender cache it's
+    -- irrelevant, because it only matters if we're 'focused', and if we're focused, we'll be
+    -- manually rerendered later anyways.
+    mode = Move
 
 -- | Renders a subtree
 renderSubtree :: FocusState -> ZMode -> ValueF PrettyJSON -> PrettyJSON
@@ -738,9 +775,12 @@ instance Z.Idx ValueF where
   idx _ _ x = pure x
 
 toCofree :: (Value -> Cofree ValueF FocusState)
-toCofree t = Cofree.unfold (\b -> (fs, FF.project b)) t
+toCofree t = FF.hylo alg FF.project $ t
   where
-    fs = FocusState NotFocused NotFolded
+    defaultFs = FocusState NotFocused NotFolded mempty
+    mode = Move
+    alg :: ValueF (Cofree ValueF FocusState) -> Cofree ValueF FocusState
+    alg vf = defaultFs {rendered = renderSubtree defaultFs mode (rendered . extract <$> vf)} :< vf
 
 bufferFrom :: Z.Zipper ValueF a -> Maybe Buffer
 bufferFrom z = newBuffer <$> (Z.branches z ^? valueFText)
