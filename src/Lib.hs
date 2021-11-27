@@ -23,6 +23,7 @@ import Control.Comonad.Cofree
 import qualified Control.Comonad.Cofree as Cofree
 import qualified Control.Comonad.Trans.Cofree as CofreeF
 import Control.Lens hiding ((:<))
+import qualified Control.Lens.Cons as Cons
 import Control.Monad.State
 import Control.Monad.Trans.Maybe (MaybeT (MaybeT, runMaybeT))
 import Data.Aeson (Value)
@@ -39,6 +40,7 @@ import qualified Data.HashMap.Strict as HashMap
 import Data.Hashable (Hashable)
 import qualified Data.List as List
 import Data.Maybe
+import Data.Sequence (Seq)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Zipper as TZ
@@ -60,11 +62,14 @@ import qualified Zipper as Z
 tabSize :: Int
 tabSize = 2
 
+maxUndoStates :: Int
+maxUndoStates = 100
+
 hoistMaybe :: Maybe a -> MaybeT Editor a
 hoistMaybe = MaybeT . pure
 
 data ZState = ZState
-  { _undo :: [Z.Zipper ValueF FocusState],
+  { _undo :: UndoZipper (Z.Zipper ValueF FocusState),
     _mode :: ZMode,
     _register :: ValueF (Cofree ValueF FocusState),
     _vty :: Vty.Vty,
@@ -80,7 +85,7 @@ mode_ = lens _mode (\s m -> s {_mode = m})
 register_ :: Lens' ZState (ValueF (Cofree ValueF FocusState))
 register_ = lens _register (\s m -> s {_register = m})
 
-undo_ :: Lens' ZState [Z.Zipper ValueF FocusState]
+undo_ :: Lens' ZState (UndoZipper (Z.Zipper ValueF FocusState))
 undo_ = lens _undo (\s m -> s {_undo = m})
 
 vty_ :: Lens' ZState Vty.Vty
@@ -197,8 +202,8 @@ footerImg = do
 pushUndo :: Z.Zipper ValueF FocusState -> Editor ()
 pushUndo z =
   undo_ %= \case
-    undos@(head' : _) | head' == z -> undos
-    undos -> z : undos
+    (UndoZipper (ls Cons.:> _) _) | length ls >= maxUndoStates -> UndoZipper (z <| ls) Empty
+    (UndoZipper ls _) -> UndoZipper (z <| ls) Empty
 
 -- log :: Show a => a -> Editor ()
 -- log a = do
@@ -207,7 +212,7 @@ pushUndo z =
 startState :: Vty.Vty -> ZState
 startState vty =
   ZState
-    { _undo = [],
+    { _undo = UndoZipper Empty Empty,
       _mode = Move,
       _register = NullF,
       _vty = vty,
@@ -325,7 +330,7 @@ handleEvent evt zipper = do
         _ -> pure z
     handleMove z =
       case evt of
-        EvKey key _mods -> case key of
+        EvKey key mods -> case key of
           KChar 'h' -> z & outOf
           KChar 'l' -> do
             z & Z.focus_ . folded_ .~ NotFolded
@@ -360,13 +365,16 @@ handleEvent evt zipper = do
             pushUndo z
             pure (z & setFocus (StringF ""))
           KChar 'u' -> do
-            -- TODO: replace undo state with a zipper to add redo
             flash_ .= "Undo"
-            use undo_ >>= \case
-              (lastZ : rest) -> do
-                undo_ .= rest
-                pure lastZ
-              _ -> pure z
+            undo_ %%= \case
+              (UndoZipper (l Cons.:< ls) rs) ->
+                (l, UndoZipper ls (z Cons.:< rs))
+              lz -> (z, lz)
+          KChar 'r' | [Vty.MCtrl] <- mods -> do
+            flash_ .= "Redo"
+            undo_ %%= \case
+              (UndoZipper ls (r Cons.:< rs)) -> (r, UndoZipper (z Cons.:< ls) rs)
+              lz -> (z, lz)
           KChar ' ' -> do
             pushUndo z
             pure (z & tryToggle)
@@ -757,7 +765,8 @@ helpImg =
           ("N", "replace element with null"),
           ("a", "replace element with array"),
           ("o", "replace element with object"),
-          ("u", "undo last change"),
+          ("u", "undo last change (undo buffer keeps 100 states)"),
+          ("ctrl-r", "redo from undo states"),
           ("y", "copy current value into buffer (and clipboard)"),
           ("p", "paste value from buffer over current value"),
           ("x", "cut a value, equivalent to a copy -> delete")
@@ -767,3 +776,10 @@ helpImg =
             Vty.text' (Vty.defAttr `Vty.withForeColor` Vty.green) (key <> ": ")
               Vty.<|> Vty.text' Vty.defAttr desc
         )
+
+data UndoZipper a
+  = UndoZipper
+      (Seq a)
+      -- ^ undo states
+      (Seq a)
+      -- ^ redo states

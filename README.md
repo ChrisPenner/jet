@@ -22,16 +22,15 @@ https://user-images.githubusercontent.com/6439644/143655548-3c556ea8-7673-4439-8
 * [x] Copy/Cut/Paste JSON subtrees
 * [x] Subtree folding so you can focus on what's important.
 * [x] Transpose values around each other in lists.
-* [x] Undo system, everyone makes mistakes
+* [x] Undo/redo system, everyone makes mistakes
 
 
 # Keymaps
 
-Press `?` to see the key map, which should be familiar for vim users.
+Press `?` to see the key map, which should feel familiar to vim users.
 
 # Roadmap/Known bugs
 
-- [ ] Redo
 - [ ] Add caching to renders
 - [ ] Improve Performance on big files
 - [ ] Allow cut/paste of _keys_ of objects.
