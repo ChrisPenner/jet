@@ -31,8 +31,6 @@ Press `?` to see the key map, which should feel familiar to vim users.
 
 # Roadmap/Known bugs
 
-- [ ] Add caching to renders
-- [ ] Improve Performance on big files
 - [ ] Fold-all/Unfold-all
 - [ ] Allow cut/paste of _keys_ of objects.
 - [ ] Allow inserting when empty key already exists

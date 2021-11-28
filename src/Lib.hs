@@ -180,7 +180,7 @@ loop z = do
   vty <- use vty_
   rendered <- uses mode_ (\m -> fullRender m z)
   footer <- footerImg
-  let screen = Vty.vertCat . Render.renderScreen (winHeight - Vty.imageHeight footer) . layoutSmart defaultLayoutOptions $ rendered
+  let screen = Vty.vertCat . Render.renderScreen (winHeight - Vty.imageHeight footer) . layoutPretty defaultLayoutOptions $ rendered
   let spacerHeight = winHeight - (Vty.imageHeight screen + Vty.imageHeight footer)
   let spacers = Vty.charFill Vty.defAttr ' ' winWidth spacerHeight
   liftIO $ Vty.update vty (Vty.picForImage (screen Vty.<-> spacers Vty.<-> footer))
@@ -335,7 +335,7 @@ handleEvent evt zipper = do
               pure z
             KEsc -> do
               newZ <- applyBuf z
-              pure $ newZ & rerender
+              pure $ newZ
             _ -> pure z
         _ -> pure z
     handleMove z =
@@ -411,6 +411,12 @@ handleEvent evt zipper = do
             -- Exit KeyMove mode if we're in it.
             mode_ .= Move
             pure $ (z & Z.focus_ . folded_ %~ toggleFold)
+          KChar 'F' -> do
+            -- Fold all child branches
+            pure $ mapChildren (mapped . folded_ .~ Folded) z
+          KChar 'f' -> do
+            -- Unfold all child branches
+            pure $ mapChildren (mapped . folded_ .~ NotFolded) z
           KBS -> do
             flash_ .= "Deleted"
             pushUndo z
@@ -475,7 +481,6 @@ tryToggle z =
   z & Z.branches_ %~ \case
     BoolF b -> BoolF (not b)
     x -> x
-    & rerender
 
 tryAddChild :: Z.Zipper ValueF FocusState -> Editor (Z.Zipper ValueF FocusState)
 tryAddChild z =
@@ -497,14 +502,12 @@ delete z = do
     ObjectF hm
       | KeyMove k <- curMode ->
         ( z & Z.branches_ .~ ObjectF (HM.delete k hm)
-            & rerender
         )
     -- Otherwise move up a layer and delete the key we were in.
     _ -> case Z.currentIndex z of
       -- If we don't have a parent, set the current node to null
       Nothing ->
         z & Z.branches_ .~ NullF
-          & rerender
       Just i -> fromMaybe z $ do
         parent <- z & rerender & Z.up
         pure $
@@ -614,9 +617,13 @@ fullRender mode z = do
 
 -- | Updates the cached render of the current focus, using cached renders for subtrees.
 rerender :: Z.Zipper ValueF FocusState -> Z.Zipper ValueF FocusState
-rerender z =
-  let (fs :< vf) = z ^. Z.unwrapped_
-   in z & Z.focus_ . rendered_ .~ (renderSubtree fs mode (rendered . extract <$> vf))
+rerender = Z.unwrapped_ %~ rerenderCofree
+
+-- Rerenders a layer of a cofree structure. Doesn't re-render the children.
+rerenderCofree :: Cofree ValueF FocusState -> Cofree ValueF FocusState
+rerenderCofree (fs :< vf) =
+  let rerendered = (renderSubtree fs mode (rendered . extract <$> vf))
+   in fs {rendered = rerendered} :< vf
   where
     -- Currently the mode is required by renderSubtree, but for the rerender cache it's
     -- irrelevant, because it only matters if we're 'focused', and if we're focused, we'll be
@@ -655,6 +662,15 @@ renderSubtree (FocusState {isFocused}) mode vf = case vf of
 
 reverseCol :: Vty.Color -> Vty.Attr
 reverseCol col = Vty.defAttr `Vty.withForeColor` col `Vty.withStyle` Vty.reverseVideo
+
+mapChildren ::
+  (Cofree ValueF FocusState -> Cofree ValueF FocusState) ->
+  Z.Zipper ValueF FocusState ->
+  Z.Zipper ValueF FocusState
+mapChildren f = Z.branches_ . mapped %~ FF.cata alg
+  where
+    alg :: CofreeF.CofreeF ValueF FocusState (Cofree ValueF FocusState) -> Cofree ValueF FocusState
+    alg (cf CofreeF.:< vf) = rerenderCofree $ f (cf :< vf)
 
 prettyWith :: Pretty a => Vty.Attr -> a -> PrettyJSON
 prettyWith ann a = annotate (Right ann) $ pretty a

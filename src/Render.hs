@@ -24,6 +24,7 @@ renderScreen winHeight doc = do
 
   let allLines =
         outputs & List.foldr collapse ([], [])
+          -- clean up anything remaining in the buffer
           & ( \(buf, rest) ->
                 if null buf
                   then rest
@@ -40,6 +41,7 @@ renderScreen winHeight doc = do
         LineBreak -> ([], Vty.horizCat buf : rest)
         ImgChunk img -> (img : buf, rest)
 
+-- Take only enough lines to fill the screen, with the cursor centered don't print any more.
 takeSurroundingCursor :: Int -> Int -> [a] -> [a]
 takeSurroundingCursor height cursorPos xs
   | cursorPos - half > 0 =
@@ -50,7 +52,9 @@ takeSurroundingCursor height cursorPos xs
   where
     half = height `div` 2
 
-toLineStream :: SimpleDocStream (Either Cursor Vty.Attr) -> State ([Vty.Attr], Int, Maybe Int) [Output]
+toLineStream ::
+  SimpleDocStream (Either Cursor Vty.Attr) ->
+  State ([Vty.Attr], Int, Maybe Int) [Output]
 toLineStream doc =
   renderSimplyDecoratedA
     renderText
