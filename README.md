@@ -35,7 +35,7 @@ Press `?` to see the key map, which should feel familiar to vim users.
 # Installation
 
 ```shell
-cabal install jet
+cabal update && cabal install jet
 ```
 
 # Usage

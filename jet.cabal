@@ -5,7 +5,7 @@ cabal-version: 1.12
 -- see: https://github.com/sol/hpack
 
 name:           jet
-version:        0.0.0.0
+version:        0.0.0.1
 description:    Please see the README on GitHub at <https://github.com/ChrisPenner/jet#readme>
 homepage:       https://github.com/ChrisPenner/jet#readme
 bug-reports:    https://github.com/ChrisPenner/jet/issues
