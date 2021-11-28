@@ -30,7 +30,7 @@ resolver: lts-18.10
 #   - wai
 packages:
 - .
-- ../recursion-zipper
+- ../recursive-zipper
 # Dependency packages to be pulled from upstream that are not in the resolver.
 # These entries can reference officially published versions as well as
 # forks / in-progress versions pinned to a git hash. For example:

@@ -1,5 +1,5 @@
 name:                jet
-version:             0.1.0.0
+version:             0.0.0.0
 github:              "ChrisPenner/jet"
 license:             BSD3
 author:              "Chris Penner"
@@ -22,7 +22,7 @@ description:         Please see the README on GitHub at <https://github.com/Chri
 dependencies:
 - base >= 4.7 && < 5
 - bytestring
-- recursion-zipper
+- recursive-zipper
 - aeson
 - aeson-extra
 - lens
