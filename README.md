@@ -1,4 +1,4 @@
-# structural-json
+# Jet - A Structural JSON editor
 
 <!-- toc GFM -->
 
@@ -10,7 +10,7 @@
 
 <!-- tocstop -->
 
-A structural editor for JSON.
+Jet is a structural editor for JSON.
 
 I.e. an editor which is aware of the *structure* of JSON and allows you to manipulate it directly.
 The document is _always_ in a valid state.
