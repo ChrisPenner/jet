@@ -30,7 +30,7 @@ resolver: lts-18.10
 #   - wai
 packages:
 - .
-- ../recursive-zipper
+# - ../recursive-zipper
 # Dependency packages to be pulled from upstream that are not in the resolver.
 # These entries can reference officially published versions as well as
 # forks / in-progress versions pinned to a git hash. For example:
@@ -41,6 +41,7 @@ packages:
 #   commit: e7b331f14bcffb8367cd58fbfc8b40ec7642100a
 #
 extra-deps:
+- recursive-zipper-0.0.0.0
 - aeson-extra-0.5.1@sha256:6070bf5aea22283acf72fa0252883e80f389613efb8f40ef928848d8f7b49f83,2829
 - Hclip-3.0.0.4@sha256:df341c936594465df25c3b9f93f6ebe3110a36d64a51dbbd1dbd557394bbdba4,1648
 

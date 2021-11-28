@@ -17,7 +17,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
-module Lib (run) where
+module Jet (run) where
 
 import Control.Category ((>>>))
 import Control.Comonad (extract)
@@ -50,8 +50,8 @@ import Data.Vector (Vector)
 import qualified Data.Vector as Vector
 import qualified Graphics.Vty as Vty
 import Graphics.Vty.Input.Events
+import qualified Jet.Render as Render
 import Prettyprinter as P
-import qualified Render
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.Hclip
@@ -70,34 +70,34 @@ maxUndoStates = 100
 hoistMaybe :: Maybe a -> MaybeT Editor a
 hoistMaybe = MaybeT . pure
 
-data ZState = ZState
+data EditorState = EditorState
   { _undo :: UndoZipper (Z.Zipper JIndex ValueF FocusState),
-    _mode :: ZMode,
+    _mode :: Mode,
     _register :: ValueF (Cofree ValueF FocusState),
     _vty :: Vty.Vty,
     _flash :: Text,
     _save :: Z.Zipper JIndex ValueF FocusState -> Editor ()
   }
 
-newtype Editor a = Editor {runEditor :: StateT ZState IO a}
-  deriving newtype (Functor, Applicative, Monad, MonadState ZState, MonadIO)
+newtype Editor a = Editor {runEditor :: StateT EditorState IO a}
+  deriving newtype (Functor, Applicative, Monad, MonadState EditorState, MonadIO)
 
-mode_ :: Lens' ZState ZMode
+mode_ :: Lens' EditorState Mode
 mode_ = lens _mode (\s m -> s {_mode = m})
 
-register_ :: Lens' ZState (ValueF (Cofree ValueF FocusState))
+register_ :: Lens' EditorState (ValueF (Cofree ValueF FocusState))
 register_ = lens _register (\s m -> s {_register = m})
 
-undo_ :: Lens' ZState (UndoZipper (Z.Zipper JIndex ValueF FocusState))
+undo_ :: Lens' EditorState (UndoZipper (Z.Zipper JIndex ValueF FocusState))
 undo_ = lens _undo (\s m -> s {_undo = m})
 
-vty_ :: Lens' ZState Vty.Vty
+vty_ :: Lens' EditorState Vty.Vty
 vty_ = lens _vty (\s m -> s {_vty = m})
 
-flash_ :: Lens' ZState Text
+flash_ :: Lens' EditorState Text
 flash_ = lens _flash (\s m -> s {_flash = m})
 
-save_ :: Lens' ZState (Z.Zipper JIndex ValueF FocusState -> Editor ())
+save_ :: Lens' EditorState (Z.Zipper JIndex ValueF FocusState -> Editor ())
 save_ = lens _save (\s m -> s {_save = m})
 
 recover :: a -> MaybeT Editor a -> Editor a
@@ -119,6 +119,10 @@ type PrettyJSON = Doc (Either Render.Cursor Vty.Attr)
 
 type Buffer = TZ.TextZipper Text
 
+-- | Nodes are annotated with one of these.
+-- This includes information about the node itself, but also
+-- a cached render of the node, which allows us to re-render
+-- the whole tree much faster.
 data FocusState = FocusState
   { isFocused :: Focused,
     isFolded :: Folded,
@@ -160,17 +164,19 @@ run = do
               exitFailure
             Right json -> pure json
         pure (json, Just f)
-      _ -> putStrLn "usage: structural-json FILE.json" *> exitFailure
+      _ -> IO.hPutStrLn IO.stderr "usage: structural-json FILE.json" *> exitFailure
   result <- edit srcFile $ json
   BS.putStrLn $ encodePretty result
 
 edit :: Maybe FilePath -> Value -> IO Value
 edit srcFile value = do
+  -- Use tty so we don't interfere with stdin/stdout
   tty <- openFile "/dev/tty" ReadWriteMode >>= Posix.handleToFd
   config <- liftIO $ Vty.standardIOConfig
   vty <- (liftIO $ Vty.mkVty config {Vty.inputFd = Just tty, Vty.outputFd = Just tty})
-  let start = Z.zipper . toCofree $ value
-  v <- flip evalStateT (startState srcFile vty) . runEditor $ loop start
+  -- load the value into a zipper.
+  let z = Z.zipper . toCofree $ value
+  v <- flip evalStateT (editorState srcFile vty) . runEditor $ loop z
   Vty.shutdown vty
   pure (Z.flatten v)
 
@@ -178,24 +184,31 @@ loop ::
   Z.Zipper JIndex ValueF FocusState ->
   Editor (Z.Zipper JIndex ValueF FocusState)
 loop z = do
-  (winWidth, winHeight) <- bounds
   vty <- use vty_
+  renderScreen z
+  flash_ .= ""
+  e <- liftIO $ Vty.nextEvent vty
+  nextZ <- handleEvent e z
+  if (shouldExit e)
+    then pure nextZ
+    else (loop nextZ)
+
+renderScreen :: Z.Zipper JIndex ValueF FocusState -> Editor ()
+renderScreen z = do
+  vty <- use vty_
+  (winWidth, winHeight) <- bounds
   rendered <- uses mode_ (\m -> fullRender m z)
   footer <- footerImg
   let screen = Vty.vertCat . Render.renderScreen (winHeight - Vty.imageHeight footer) . layoutPretty defaultLayoutOptions $ rendered
   let spacerHeight = winHeight - (Vty.imageHeight screen + Vty.imageHeight footer)
   let spacers = Vty.charFill Vty.defAttr ' ' winWidth spacerHeight
   liftIO $ Vty.update vty (Vty.picForImage (screen Vty.<-> spacers Vty.<-> footer))
-  flash_ .= ""
-  e <- liftIO $ Vty.nextEvent vty
-  nextZ <- handleEvent e z
-  if (maybeQuit e)
-    then pure nextZ
-    else (loop nextZ)
 
+-- | Get the current bounds of the current terminal screen.
 bounds :: Editor (Int, Int)
 bounds = use vty_ >>= liftIO . Vty.displayBounds . Vty.outputIface
 
+-- | Render the footer bar to an image
 footerImg :: Editor Vty.Image
 footerImg = do
   (w, _) <- bounds
@@ -210,19 +223,16 @@ footerImg = do
         helpMsg
       ]
 
+-- | Push the given zipper onto history iff it's distinct from the most recent undo state.
 pushUndo :: Z.Zipper JIndex ValueF FocusState -> Editor ()
 pushUndo z =
   undo_ %= \case
     (UndoZipper (ls Cons.:> _) _) | length ls >= maxUndoStates -> UndoZipper (z <| ls) Empty
     (UndoZipper ls _) -> UndoZipper (z <| ls) Empty
 
--- log :: Show a => a -> Editor ()
--- log a = do
---   liftIO $ appendFile "log.txt" (show a <> "\n")
-
-startState :: Maybe FilePath -> Vty.Vty -> ZState
-startState srcFile vty =
-  ZState
+editorState :: Maybe FilePath -> Vty.Vty -> EditorState
+editorState srcFile vty =
+  EditorState
     { _undo = UndoZipper Empty Empty,
       _mode = Move,
       _register = NullF,
@@ -237,8 +247,8 @@ startState srcFile vty =
         liftIO $ BS.writeFile fp (z & Z.flatten & encodePretty @Value)
         flash_ .= "Saved to " <> Text.pack fp
 
-maybeQuit :: Vty.Event -> Bool
-maybeQuit = \case
+shouldExit :: Vty.Event -> Bool
+shouldExit = \case
   EvKey (KChar 'c') [Vty.MCtrl] -> True
   EvKey (KChar 'q') [] -> True
   _ -> False
@@ -246,6 +256,7 @@ maybeQuit = \case
 bufferText :: Buffer -> Text
 bufferText = Text.concat . TZ.getText
 
+-- | Apply the state that's in the current mode's buffer to the selected node if possible.
 applyBuf :: Z.Zipper JIndex ValueF FocusState -> Editor (Z.Zipper JIndex ValueF FocusState)
 applyBuf z = do
   use mode_ >>= \case
@@ -280,20 +291,17 @@ renameKey srcKey destKey hm =
       at srcKey .= Nothing
       at destKey .= v
 
-valueFText :: Traversal' (ValueF x) Text
-valueFText f = \case
-  v@(ObjectF _hm) -> pure v
-  v@(ArrayF _vec) -> pure v
-  StringF txt -> StringF <$> f txt
-  v@(NumberF sci) ->
-    f (Text.pack . show $ sci) <&> \n -> case readMaybe (Text.unpack n) of
-      Nothing -> v
-      Just n' -> NumberF n'
-  (BoolF b) -> pure (BoolF b)
-  -- f (Text.pack . show $ b) <&> \b' -> case readMaybe (Text.unpack b') of
-  --   Nothing -> v
-  --   Just b'' -> BoolF b''
-  NullF -> pure NullF
+-- | Create a buffer using the text from the current value.
+bufferForValueF :: ValueF x -> Maybe Buffer
+bufferForValueF = \case
+  (ObjectF _hm) -> Nothing
+  (ArrayF _vec) -> Nothing
+  StringF txt -> Just $ newBuffer txt
+  (NumberF sci) ->
+    Just $ newBuffer (Text.pack . show $ sci)
+  (BoolF True) -> Just $ newBuffer "true"
+  (BoolF False) -> Just $ newBuffer "true"
+  NullF -> Just $ newBuffer "null"
 
 boolText_ :: Prism' Text Bool
 boolText_ = prism' toText toBool
@@ -304,20 +312,21 @@ boolText_ = prism' toText toBool
     toBool "false" = Just False
     toBool _ = Nothing
 
-data ZMode
+data Mode
   = Edit {_buf :: Buffer}
   | Move
   | KeyMove {_selectedKey :: Text}
   | KeyEdit {_selectedKey :: Text, _buf :: Buffer}
   deriving (Show)
 
-buf_ :: Traversal' ZMode Buffer
+buf_ :: Traversal' Mode Buffer
 buf_ f = \case
   Edit b -> Edit <$> f b
   Move -> pure Move
   KeyMove txt -> pure (KeyMove txt)
   KeyEdit txt b -> KeyEdit txt <$> f b
 
+-- | Main event handler
 handleEvent :: Vty.Event -> Z.Zipper JIndex ValueF FocusState -> Editor (Z.Zipper JIndex ValueF FocusState)
 handleEvent evt zipper = do
   use mode_ >>= \case
@@ -326,9 +335,14 @@ handleEvent evt zipper = do
     KeyEdit {} -> handleEdit zipper
     Edit {} -> handleEdit zipper
   where
+    handleEdit ::
+      ( Z.Zipper JIndex ValueF FocusState ->
+        Editor (Z.Zipper JIndex ValueF FocusState)
+      )
     handleEdit z =
       case evt of
         EvKey key [] ->
+          -- Perform buffer updates:
           case key of
             KChar c -> do
               mode_ . buf_ %= TZ.insertChar c
@@ -347,90 +361,120 @@ handleEvent evt zipper = do
               pure $ newZ
             _ -> pure z
         _ -> pure z
+    handleMove ::
+      ( Z.Zipper JIndex ValueF FocusState ->
+        Editor (Z.Zipper JIndex ValueF FocusState)
+      )
     handleMove z =
       case evt of
         EvKey key mods -> case key of
+          -- move up
           KChar 'h' -> z & outOf
+          -- move down
           KChar 'l' -> do
             z & Z.focus_ . folded_ .~ NotFolded
               & into
+          -- next sibling
           KChar 'j' -> z & sibling Forward
+          -- move down
           KChar 'J' -> do
             pushUndo z
             pure (z & moveElement Forward)
+          -- prev sibling
+          KChar 'k' -> z & sibling Backward
+          -- move up
           KChar 'K' -> do
             pushUndo z
             pure (z & moveElement Backward)
-          KChar 'k' -> z & sibling Backward
+          -- add new node
           KChar 'i' -> do
             pushUndo z
             insert z
+          -- replace with boolean
           KChar 'b' -> do
             pushUndo z
             pure (z & setFocus (BoolF True))
+          -- replace with object
           KChar 'o' -> do
             pushUndo z
             pure (z & setFocus (ObjectF mempty))
+          -- replace with array
           KChar 'a' -> do
             pushUndo z
             pure (z & setFocus (ArrayF mempty))
+          -- replace with number
           KChar 'n' -> do
             pushUndo z
             pure (z & setFocus (NumberF 0))
+          -- replace with Null
           KChar 'N' -> do
             pushUndo z
             pure (z & setFocus NullF)
+          -- Save file
           KChar 's'
             | [Vty.MCtrl] <- mods -> do
               saver <- use save_
               saver z
               pure z
+          -- replace with string
           KChar 's' -> do
             pushUndo z
             pure (z & setFocus (StringF ""))
+          -- undo
           KChar 'u' -> do
             flash_ .= "Undo"
             undo_ %%= \case
               (UndoZipper (l Cons.:< ls) rs) ->
                 (l, UndoZipper ls (z Cons.:< rs))
               lz -> (z, lz)
+          -- redo
           KChar 'r' | [Vty.MCtrl] <- mods -> do
             flash_ .= "Redo"
             undo_ %%= \case
               (UndoZipper ls (r Cons.:< rs)) -> (r, UndoZipper (z Cons.:< ls) rs)
               lz -> (z, lz)
+          -- toggle bool
           KChar ' ' -> do
             pushUndo z
-            pure (z & tryToggle)
+            pure (z & tryToggleBool)
+          -- copy
           KChar 'y' -> do
             flash_ .= "Copied"
             copy z
+          -- paste
           KChar 'p' -> do
             flash_ .= "Paste"
             pushUndo z
             paste z
+          -- cut
           KChar 'x' -> do
             flash_ .= "Cut"
             pushUndo z
             copy z >>= delete
+          -- help
           KChar '?' -> do
             vty <- use vty_
             liftIO $ Vty.update vty (Vty.picForImage helpImg)
             void $ liftIO $ Vty.nextEvent vty
             pure z
+          -- add child
           KEnter -> do
             pushUndo z
             tryAddChild z
+          -- toggle fold
           KChar '\t' -> do
             -- Exit KeyMove mode if we're in it.
             mode_ .= Move
             pure $ (z & Z.focus_ . folded_ %~ toggleFold)
+          -- Fold all children
           KChar 'F' -> do
             -- Fold all child branches
             pure $ mapChildren (mapped . folded_ .~ Folded) z
+          -- unfold all children
           KChar 'f' -> do
             -- Unfold all child branches
             pure $ mapChildren (mapped . folded_ .~ NotFolded) z
+          -- delete node
           KBS -> do
             flash_ .= "Deleted"
             pushUndo z
@@ -451,7 +495,7 @@ handleEvent evt zipper = do
           mode_ .= KeyEdit k (newBuffer k)
           pure $ z & Z.focus_ . folded_ .~ NotFolded
         Move
-          | Just editBuf <- bufferFrom z -> do
+          | Just editBuf <- bufferForValueF (z ^. Z.branches_) -> do
             mode_ .= Edit editBuf
             pure $ z & Z.focus_ . folded_ .~ NotFolded
         _ -> pure z
@@ -462,11 +506,16 @@ encodeValueFCofree vf = LBS.unpack . encodePretty . FF.embed $ fmap (FF.cata alg
     alg :: CofreeF.CofreeF ValueF ann Value -> Value
     alg (_ CofreeF.:< vf') = FF.embed vf'
 
-setFocus :: ValueF (Cofree ValueF FocusState) -> Z.Zipper JIndex ValueF FocusState -> Z.Zipper JIndex ValueF FocusState
+-- | Set the value of the focused node.
+setFocus ::
+  ValueF (Cofree ValueF FocusState) ->
+  Z.Zipper JIndex ValueF FocusState ->
+  Z.Zipper JIndex ValueF FocusState
 setFocus f z = z & Z.branches_ .~ f & rerender
 
 data Dir = Forward | Backward
 
+-- | Move the current value within an array
 moveElement :: Dir -> Z.Zipper JIndex ValueF FocusState -> Z.Zipper JIndex ValueF FocusState
 moveElement dir z = fromMaybe z $ do
   i <- case Z.currentIndex z of
@@ -490,8 +539,8 @@ moveElement dir z = fromMaybe z $ do
               & fromMaybe z . Z.down (Index swapI)
       _ -> z
 
-tryToggle :: Z.Zipper JIndex ValueF FocusState -> Z.Zipper JIndex ValueF FocusState
-tryToggle z =
+tryToggleBool :: Z.Zipper JIndex ValueF FocusState -> Z.Zipper JIndex ValueF FocusState
+tryToggleBool z =
   z & Z.branches_ %~ \case
     BoolF b -> BoolF (not b)
     x -> x
@@ -507,6 +556,7 @@ tryAddChild z =
       pure $ ArrayF $ arr <> pure (toCofree Aeson.Null)
     x -> pure x
 
+-- | Delete the current node
 delete :: Z.Zipper JIndex ValueF FocusState -> Editor (Z.Zipper JIndex ValueF FocusState)
 delete z = do
   curMode <- use mode_
@@ -530,6 +580,7 @@ delete z = do
             ArrayF arr | Index j <- i -> ArrayF (Vector.ifilter (\i' _ -> i' /= j) arr)
             x -> x
 
+-- | Move to next/previous sibling.
 sibling :: Dir -> Z.Zipper JIndex ValueF FocusState -> Editor (Z.Zipper JIndex ValueF FocusState)
 sibling dir z = recover z $ do
   mode <- use mode_
@@ -578,6 +629,7 @@ findBefore p xs = fmap snd . List.find (p . fst) $ zip (drop 1 xs) xs
 newBuffer :: Text -> Buffer
 newBuffer txt = TZ.gotoEOF $ TZ.textZipper (Text.lines txt) Nothing
 
+-- | Move into the current node
 into :: Z.Zipper JIndex ValueF FocusState -> Editor (Z.Zipper JIndex ValueF FocusState)
 into z = do
   mode <- use mode_
@@ -595,6 +647,7 @@ into z = do
       pure $ Z.tug (Z.down (Index 0)) z
     _ -> pure z
 
+-- | Move out of the current node
 outOf :: Z.Zipper JIndex ValueF FocusState -> Editor (Z.Zipper JIndex ValueF FocusState)
 outOf z = do
   mode <- use mode_
@@ -610,8 +663,8 @@ outOf z = do
       maybe (pure ()) (\k -> mode_ .= KeyMove k) maybeParentKey
       pure (Z.tug (rerender >>> Z.up) z)
 
--- Render the given zipper using render caches stored in each node.
-fullRender :: ZMode -> Z.Zipper JIndex ValueF FocusState -> PrettyJSON
+-- | Render the full zipper using render caches stored in each node.
+fullRender :: Mode -> Z.Zipper JIndex ValueF FocusState -> PrettyJSON
 fullRender mode z = do
   let focusedRender =
         z & Z.focus_ . focused_ .~ Focused
@@ -645,7 +698,7 @@ rerenderCofree (fs :< vf) =
     mode = Move
 
 -- | Renders a subtree
-renderSubtree :: FocusState -> ZMode -> ValueF PrettyJSON -> PrettyJSON
+renderSubtree :: FocusState -> Mode -> ValueF PrettyJSON -> PrettyJSON
 renderSubtree (FocusState {isFolded = Folded, isFocused}) _ vf = case vf of
   ObjectF {} -> colored' Vty.white "{...}"
   ArrayF {} -> colored' Vty.white "[...]"
@@ -674,9 +727,11 @@ renderSubtree (FocusState {isFocused}) mode vf = case vf of
     colored' col txt =
       P.annotate (Right $ if isFocused == Focused then reverseCol col else Vty.defAttr `Vty.withForeColor` col) (pretty txt)
 
+-- | Attr in reverse-video
 reverseCol :: Vty.Color -> Vty.Attr
 reverseCol col = Vty.defAttr `Vty.withForeColor` col `Vty.withStyle` Vty.reverseVideo
 
+-- | Map over all children of the current node, re-rendering after changes.
 mapChildren ::
   (Cofree ValueF FocusState -> Cofree ValueF FocusState) ->
   Z.Zipper JIndex ValueF FocusState ->
@@ -700,6 +755,10 @@ renderBuffer col buf =
         Just (c, rest) -> prettyWith (reverseCol col) c <> colored col rest
    in colored col prefix <> suffixImg
 
+cursor :: Focused -> PrettyJSON -> PrettyJSON
+cursor Focused = P.annotate (Left Render.Cursor)
+cursor _ = id
+
 prettyArray :: Focused -> Vector PrettyJSON -> PrettyJSON
 prettyArray foc vs =
   let inner :: [PrettyJSON] =
@@ -715,11 +774,7 @@ prettyArray foc vs =
       | i == Vector.length vs - 1 = mempty
       | otherwise = ","
 
-cursor :: Focused -> PrettyJSON -> PrettyJSON
-cursor Focused = P.annotate (Left Render.Cursor)
-cursor _ = id
-
-prettyObj :: Focused -> ZMode -> HashMap Text PrettyJSON -> PrettyJSON
+prettyObj :: Focused -> Mode -> HashMap Text PrettyJSON -> PrettyJSON
 prettyObj focused mode vs =
   let inner :: PrettyJSON
       inner =
@@ -750,6 +805,7 @@ prettyObj focused mode vs =
       (Focused, Move) -> prettyWith (reverseCol Vty.white) t
       _ -> pretty t
 
+-- Orphan instances
 instance Eq1 ValueF where
   liftEq f vf1 vf2 = case (vf1, vf2) of
     (ObjectF l, ObjectF r) -> liftEq f l r
@@ -814,9 +870,6 @@ toCofree t = FF.hylo alg FF.project $ t
     alg :: ValueF (Cofree ValueF FocusState) -> Cofree ValueF FocusState
     alg vf = defaultFs {rendered = renderSubtree defaultFs mode (rendered . extract <$> vf)} :< vf
 
-bufferFrom :: Z.Zipper JIndex ValueF a -> Maybe Buffer
-bufferFrom z = newBuffer <$> (Z.branches z ^? valueFText)
-
 helpImg :: Vty.Image
 helpImg =
   let helps =
@@ -858,15 +911,8 @@ helpImg =
           )
    in (Vty.vertCat keys Vty.<|> Vty.vertCat descs)
 
-data UndoZipper a
-  = UndoZipper
-      (Seq a)
-      -- ^ undo states
-      (Seq a)
-      -- ^ redo states
-
--- -- | Recomputes the spine at the current position, then at every position from that point
--- -- upwards until the zipper is closed, returning the result.
+-- | Recomputes the spine at the current position, then at every position from that point
+-- upwards until the zipper is closed, returning the result.
 foldSpine :: (Functor f, Z.Idx i f a) => (a -> f a -> a) -> Z.Zipper i f a -> a
 foldSpine f z =
   case Z.up z of
@@ -874,3 +920,10 @@ foldSpine f z =
     Just parent ->
       let next = f (parent ^. Z.focus_) (fmap Comonad.extract . Z.branches $ parent)
        in foldSpine f (parent & Z.focus_ .~ next)
+
+data UndoZipper a
+  = UndoZipper
+      (Seq a)
+      -- ^ undo states
+      (Seq a)
+      -- ^ redo states

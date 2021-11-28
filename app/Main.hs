@@ -1,6 +1,6 @@
 module Main where
 
-import Lib
+import Jet
 
 main :: IO ()
 main = run

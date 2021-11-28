@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Render where
+module Jet.Render where
 
 import Control.Lens
 import Control.Monad.State

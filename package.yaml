@@ -22,7 +22,7 @@ description:         Please see the README on GitHub at <https://github.com/Chri
 dependencies:
 - base >= 4.7 && < 5
 - bytestring
-- recursive-zipper
+- recursive-zipper == 0.0.0.0
 - aeson
 - aeson-extra
 - lens
