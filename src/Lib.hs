@@ -23,6 +23,7 @@ import Control.Category ((>>>))
 import Control.Comonad (extract)
 import Control.Comonad.Cofree
 import qualified Control.Comonad.Trans.Cofree as CofreeF
+import Control.Exception (bracket)
 import Control.Lens hiding ((:<))
 import qualified Control.Lens.Cons as Cons
 import Control.Monad.State
@@ -54,7 +55,7 @@ import qualified Render
 import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.Hclip
-import System.IO (IOMode (ReadMode), openFile)
+import System.IO (IOMode (ReadWriteMode), openFile)
 import qualified System.IO as IO
 import qualified System.Posix as Posix
 import Text.Read (readMaybe)
@@ -74,7 +75,8 @@ data ZState = ZState
     _mode :: ZMode,
     _register :: ValueF (Cofree ValueF FocusState),
     _vty :: Vty.Vty,
-    _flash :: Text
+    _flash :: Text,
+    _save :: Z.Zipper ValueF FocusState -> Editor ()
   }
 
 newtype Editor a = Editor {runEditor :: StateT ZState IO a}
@@ -94,6 +96,9 @@ vty_ = lens _vty (\s m -> s {_vty = m})
 
 flash_ :: Lens' ZState Text
 flash_ = lens _flash (\s m -> s {_flash = m})
+
+save_ :: Lens' ZState (Z.Zipper ValueF FocusState -> Editor ())
+save_ = lens _save (\s m -> s {_save = m})
 
 recover :: a -> MaybeT Editor a -> Editor a
 recover def m = do
@@ -128,9 +133,6 @@ instance Eq FocusState where
 focused_ :: Lens' FocusState Focused
 focused_ = lens isFocused (\fs new -> fs {isFocused = new})
 
-rendered_ :: Lens' FocusState PrettyJSON
-rendered_ = lens rendered (\fs new -> fs {rendered = new})
-
 folded_ :: Lens' FocusState Folded
 folded_ = lens isFolded (\fs new -> fs {isFolded = new})
 
@@ -140,7 +142,7 @@ toggleFold NotFolded = Folded
 
 run :: IO ()
 run = do
-  (json, inputFd) <-
+  (json, srcFile) <-
     getArgs >>= \case
       [] -> do
         json <-
@@ -149,8 +151,7 @@ run = do
               IO.hPutStrLn IO.stderr err
               exitFailure
             Right json -> pure json
-        tty <- openFile "/dev/tty" ReadMode >>= Posix.handleToFd
-        pure (json, Just tty)
+        pure (json, Nothing)
       [f] -> do
         json <-
           Aeson.eitherDecodeFileStrict f >>= \case
@@ -158,18 +159,19 @@ run = do
               IO.hPutStrLn IO.stderr err
               exitFailure
             Right json -> pure json
-        pure (json, Nothing)
+        pure (json, Just f)
       _ -> putStrLn "usage: structural-json FILE.json" *> exitFailure
-  result <- edit inputFd $ json
+  result <- edit srcFile $ json
   BS.putStrLn $ encodePretty result
 
-edit :: Maybe Posix.Fd -> Value -> IO Value
-edit input value = do
+edit :: Maybe FilePath -> Value -> IO Value
+edit srcFile value = do
+  tty <- openFile "/dev/tty" ReadWriteMode >>= Posix.handleToFd
   config <- liftIO $ Vty.standardIOConfig
-  vty <- liftIO $ Vty.mkVty config {Vty.inputFd = input}
+  vty <- (liftIO $ Vty.mkVty config {Vty.inputFd = Just tty, Vty.outputFd = Just tty})
   let start = Z.zipper . toCofree $ value
-  v <- flip evalStateT (startState vty) . runEditor $ loop start
-  liftIO $ Vty.shutdown vty
+  v <- flip evalStateT (startState srcFile vty) . runEditor $ loop start
+  Vty.shutdown vty
   pure (Z.flatten v)
 
 loop ::
@@ -218,15 +220,22 @@ pushUndo z =
 -- log a = do
 --   liftIO $ appendFile "log.txt" (show a <> "\n")
 
-startState :: Vty.Vty -> ZState
-startState vty =
+startState :: Maybe FilePath -> Vty.Vty -> ZState
+startState srcFile vty =
   ZState
     { _undo = UndoZipper Empty Empty,
       _mode = Move,
       _register = NullF,
       _vty = vty,
-      _flash = "Hello World"
+      _flash = "Hello World",
+      _save = saveFile
     }
+  where
+    saveFile = case srcFile of
+      Nothing -> const (pure ())
+      Just fp -> \z -> do
+        liftIO $ BS.writeFile fp (z & Z.flatten & encodePretty @Value)
+        flash_ .= "Saved to " <> Text.pack fp
 
 maybeQuit :: Vty.Event -> Bool
 maybeQuit = \case
@@ -371,6 +380,11 @@ handleEvent evt zipper = do
           KChar 'N' -> do
             pushUndo z
             pure (z & setFocus NullF)
+          KChar 's'
+            | [Vty.MCtrl] <- mods -> do
+              saver <- use save_
+              saver z
+              pure z
           KChar 's' -> do
             pushUndo z
             pure (z & setFocus (StringF ""))
@@ -803,7 +817,7 @@ bufferFrom z = newBuffer <$> (Z.branches z ^? valueFText)
 
 helpImg :: Vty.Image
 helpImg =
-  let keys =
+  let helps =
         [ ("h", "ascend"),
           ("l", "descend"),
           ("j", "next sibling"),
@@ -811,11 +825,12 @@ helpImg =
           ("J", "move down (in array)"),
           ("K", "move up (in array)"),
           ("i", "enter edit mode (string/number)"),
-          ("<space>", "toggle boolean"),
-          ("<escape>", "exit edit mode"),
-          ("<backspace>", "delete key/element"),
-          ("<enter>", "add new key/element (object/array)"),
-          ("<tab>", "toggle fold"),
+          ("<C-s>", "save file"),
+          ("<SPACE>", "toggle boolean"),
+          ("<ESC>", "exit edit mode"),
+          ("<BS>", "delete key/element"),
+          ("<ENTER>", "add new key/element (object/array)"),
+          ("<TAB>", "toggle fold"),
           ("f", "unfold all children"),
           ("F", "fold all children"),
           ("s", "replace element with string"),
@@ -825,16 +840,20 @@ helpImg =
           ("a", "replace element with array"),
           ("o", "replace element with object"),
           ("u", "undo last change (undo buffer keeps 100 states)"),
-          ("ctrl-r", "redo from undo states"),
+          ("<C-r>", "redo from undo states"),
           ("y", "copy current value into buffer (and clipboard)"),
           ("p", "paste value from buffer over current value"),
           ("x", "cut a value, equivalent to a copy -> delete")
         ]
-   in Vty.vertCat
-        ( keys <&> \(key, desc) ->
-            Vty.text' (Vty.defAttr `Vty.withForeColor` Vty.green) (key <> ": ")
-              Vty.<|> Vty.text' Vty.defAttr desc
-        )
+
+      (keys, descs) =
+        unzip
+          ( helps <&> \(key, desc) ->
+              ( Vty.text' (Vty.defAttr `Vty.withForeColor` Vty.green) (key <> ": "),
+                Vty.text' Vty.defAttr desc
+              )
+          )
+   in (Vty.vertCat keys Vty.<|> Vty.vertCat descs)
 
 data UndoZipper a
   = UndoZipper

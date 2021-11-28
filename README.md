@@ -23,6 +23,7 @@ https://user-images.githubusercontent.com/6439644/143655548-3c556ea8-7673-4439-8
 * [x] Subtree folding so you can focus on what's important.
 * [x] Transpose values around each other in lists.
 * [x] Undo/redo system, everyone makes mistakes
+* [x] Save functionality
 
 
 # Keymaps
@@ -31,9 +32,8 @@ Press `?` to see the key map, which should feel familiar to vim users.
 
 # Roadmap/Known bugs
 
-- [ ] Fold-all/Unfold-all
 - [ ] Allow cut/paste of _keys_ of objects.
 - [ ] Allow inserting when empty key already exists
-- [ ] Allow saving files in-place
 - [ ] Add search
 - [ ] Improved visibility around copy/paste with highlighting
+- [ ] Increment/decrement commands for integers.
