@@ -1,5 +1,5 @@
 name:                jet
-version:             0.0.0.0
+version:             0.0.0.1
 github:              "ChrisPenner/jet"
 license:             BSD3
 author:              "Chris Penner"
@@ -72,7 +72,7 @@ library:
   source-dirs: src
 
 executables:
-  jet-exe:
+  jet:
     main:                Main.hs
     source-dirs:         app
     ghc-options:
