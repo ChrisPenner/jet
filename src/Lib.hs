@@ -843,7 +843,8 @@ helpImg =
           ("<C-r>", "redo from undo states"),
           ("y", "copy current value into buffer (and clipboard)"),
           ("p", "paste value from buffer over current value"),
-          ("x", "cut a value, equivalent to a copy -> delete")
+          ("x", "cut a value, equivalent to a copy -> delete"),
+          ("q | ctrl-c", "quit without saving. Due to a bug, tap twice")
         ]
 
       (keys, descs) =

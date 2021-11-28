@@ -4,6 +4,8 @@
 
 * [Features](#features)
 * [Keymaps](#keymaps)
+* [Installation](#installation)
+* [Usage](#usage)
 * [Roadmap/Known bugs](#roadmapknown-bugs)
 
 <!-- tocstop -->
@@ -30,8 +32,26 @@ https://user-images.githubusercontent.com/6439644/143655548-3c556ea8-7673-4439-8
 
 Press `?` to see the key map, which should feel familiar to vim users.
 
+# Installation
+
+```shell
+cabal install jet
+```
+
+# Usage
+
+```shell
+# Open a file for editing. Use ctrl-s to save back to the file.
+# The edited file is output to stdout even if unsaved.
+jet myfile.json 
+
+# Using jet in a pipeline for quick in-line edits.
+cat myfile.json | jet > result.json
+```
+
 # Roadmap/Known bugs
 
+- [ ] Figure out why vty needs two keystrokes to quit for some reason.
 - [ ] Allow cut/paste of _keys_ of objects.
 - [ ] Allow inserting when empty key already exists
 - [ ] Add search
