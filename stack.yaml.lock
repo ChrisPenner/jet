@@ -5,12 +5,12 @@
 
 packages:
 - completed:
-    hackage: recursive-zipper-0.0.0.0@sha256:ebbb7aec32c809aa78ec30ecc85ec8d23dff34fd683003b48c84e463ec5d2ca3,1170
+    hackage: recursive-zipper-0.0.0.1@sha256:dc96b1a36c1c1c0d4166756d02e21edcefae0010e668d891cfbbaa8c26a1d65f,1170
     pantry-tree:
       size: 395
-      sha256: 9898495b7033cf56ce1c73e0a2b9b4a0e7f89912a1c16e443876e53139eb4e05
+      sha256: 32eb74301ae557495b374759426413ab64bb81d148b4505de73207a3fcbed922
   original:
-    hackage: recursive-zipper-0.0.0.0
+    hackage: recursive-zipper-0.0.0.1
 - completed:
     hackage: aeson-extra-0.5.1@sha256:6070bf5aea22283acf72fa0252883e80f389613efb8f40ef928848d8f7b49f83,2829
     pantry-tree:
