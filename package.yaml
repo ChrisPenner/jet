@@ -36,7 +36,6 @@ dependencies:
 - vector
 - unordered-containers
 - aeson-pretty
-- bytestring
 - comonad
 - text-zipper
 - scientific
